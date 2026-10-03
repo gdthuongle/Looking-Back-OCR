@@ -128,3 +128,12 @@ Mã nguồn worker: `/opt/pdfocr/worker/` (dùng lại prompt và bộ dựng HT
 ## Cập nhật bản mới
     /opt/pdfocr-deploy/update.sh
 Giữ các bản sửa tại máy (git commit "Bản sửa tại máy…", lấy bản GitHub rồi đặt bản sửa lên trên). Nếu xung đột thì dừng, không đổi gì.
+
+## Chuyển HTML sang Markdown (cho giasu)
+    # chép các file .html (kết quả OCR) vào /opt/pdfocr/tools/html/ rồi chạy:
+    /opt/pdfocr/tools/chuyen-html-md.py
+    # thư mục khác:  /opt/pdfocr/tools/chuyen-html-md.py <thư mục html> <thư mục md>
+- Kết quả trong `/opt/pdfocr/tools/md/<tên>.md`. File .html **chuyển thành công thì tự xóa**; file lỗi giữ nguyên và báo ❌.
+- Giữ: tiêu đề, đoạn, đậm/nghiêng, danh sách, bảng, phép tính (MathML → `385 = 300 + 80 + 5`), mốc `[Trang N]`.
+- Ảnh trang gốc (trang AI từ chối) được tách thành file `<tên>-anh-1.png`… cạnh file .md; ảnh AI "bịa" bị bỏ,
+  chỉ giữ lời mô tả `[Hình: …]`. Không gọi AI, không tốn lượt.
