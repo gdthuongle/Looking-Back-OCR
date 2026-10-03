@@ -129,7 +129,15 @@ Mã nguồn worker: `/opt/pdfocr/worker/` (dùng lại prompt và bộ dựng HT
     /opt/pdfocr-deploy/update.sh
 Giữ các bản sửa tại máy (git commit "Bản sửa tại máy…", lấy bản GitHub rồi đặt bản sửa lên trên). Nếu xung đột thì dừng, không đổi gì.
 
-## Chuyển HTML sang Markdown (cho giasu)
+## Xuất Markdown cho giasu (khuyên dùng)
+    /opt/pdfocr/tools/xuat-md.py            # mọi tài liệu đã OCR xong -> /opt/pdfocr/tools/md/<tên>.md
+    /opt/pdfocr/tools/xuat-md.py --lai      # xuất lại tất cả
+- Lấy từ bản thô đã lưu nên **giữ công thức dạng LaTeX** `$3 \times 3 = 9$` (file .html đã đổi công thức sang MathML).
+- Chạy lại lúc nào cũng được: **bỏ qua file đã xuất** (nhớ trong `tools/md/.da-chuyen.json`, kể cả khi bạn đã chuyển
+  file .md đi chỗ khác); chỉ xuất file mới OCR xong hoặc vừa OCR lại. File đang OCR dở để lần sau.
+- Trang AI từ chối: kèm ảnh trang gốc `<tên>-trang-N.png`. Có mốc `[Trang N]` (kiểu Bảo toàn). Hỗ trợ cả kiểu DOCX.
+
+## Chuyển file HTML sang Markdown (HTML tải từ bản web)
     # chép các file .html (kết quả OCR) vào /opt/pdfocr/tools/html/ rồi chạy:
     /opt/pdfocr/tools/chuyen-html-md.py
     # thư mục khác:  /opt/pdfocr/tools/chuyen-html-md.py <thư mục html> <thư mục md>
