@@ -313,4 +313,27 @@ describe('đường ống đầy đủ', () => {
     expect(logs.some(l => l.includes('bỏ qua trang 5 vì AI từ chối'))).toBe(true);
     expect(calls.filter(c => !c.style).length).toBeLessThan(40);      // không lặp vô hạn
   });
+
+  test('tiền tố L-/M-/H- chọn mức suy nghĩ; tên kết quả bỏ tiền tố', async () => {
+    const { levelFromName, docTitle } = await import('./main');
+    expect(levelFromName('M-sach-y-hoc.pdf')).toBe('MEDIUM');
+    expect(levelFromName('h_sach.pdf')).toBe('HIGH');
+    expect(levelFromName('L sach.pdf')).toBe('LOW');
+    expect(levelFromName('Mau-sach.pdf')).toBeNull();                 // "Mau-..." không phải tiền tố
+    expect(docTitle('M-sach-y-hoc.pdf')).toBe('sach-y-hoc');
+    const seen: string[] = [];
+    script = c => null;
+    await makePdf(join(root, 'input', 'M-sach-y-hoc.pdf'), 3);
+    await makePdf(join(root, 'input', 'thuong.pdf'), 3);
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async (u: any, init: any) => {
+      const b = JSON.parse(init.body); seen.push(b.generationConfig.thinkingConfig.thinkingLevel);
+      return orig(u, init);
+    }) as any;
+    try { await runUntilIdle(worker({ thinking: 'LOW' })); } finally { globalThis.fetch = orig; }
+    expect(existsSync(join(root, 'output', 'sach-y-hoc.html'))).toBe(true);
+    expect(existsSync(join(root, 'input', 'daocr', 'M-sach-y-hoc.pdf'))).toBe(true);
+    expect(seen).toContain('MEDIUM');
+    expect(seen).toContain('LOW');                                     // file không tiền tố dùng OCR_THINKING
+  });
 });

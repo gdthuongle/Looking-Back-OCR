@@ -55,6 +55,17 @@ Chép file vào thư mục, máy chủ tự OCR **lần lượt từng file**, t
 | `/opt/pdfocr/input/` | Bảo toàn (giữ bố cục) | `<tên>.html` |
 | `/opt/pdfocr/input/docx/` | DOCX (để sửa tiếp) | `<tên>.docx` + `<tên>.md` |
 
+**Chọn mức "suy nghĩ" của AI bằng tiền tố tên file** (kết quả tự bỏ tiền tố, vd `M-sach-y-hoc.pdf` → `sach-y-hoc.html`):
+
+| Tiền tố | Mức | Đo thử 3 trang | Dùng khi |
+|---|---|---|---|
+| `L-` | LOW | ~37 giây | Sách chữ là chính, cần nhanh |
+| `M-` | MEDIUM | ~47 giây | Cân bằng |
+| `H-` | HIGH (như bản web) | ~50–63 giây, đôi khi bị cắt cụt | Nhiều hình/sơ đồ/bảng cần vẽ lại kỹ |
+| (không có) | theo `OCR_THINKING` trong `ocr.env` (đang đặt LOW) | | |
+
+Trong phép đo, phần chữ ở cả 3 mức đều đúng như nhau. Khác biệt nằm ở hình: HIGH vẽ lại mặt đồng hồ, còn LOW/MEDIUM thay bằng emoji.
+
 Nhận file `.pdf`, `.jpg`, `.png` (mỗi ảnh thành một tài liệu riêng). Không giới hạn số trang/dung lượng như bản web.
 
 - Xong: file gốc chuyển vào `input/daocr/`.

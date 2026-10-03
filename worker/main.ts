@@ -27,6 +27,17 @@ interface FileState {
 }
 
 const EXT = new Set(['.pdf', '.jpg', '.jpeg', '.png']);
+const LEVELS: Record<string, string> = { L: 'LOW', M: 'MEDIUM', H: 'HIGH' };
+
+/** Tiền tố chọn mức suy nghĩ: "M-sach.pdf" -> MEDIUM. Không có tiền tố -> null (dùng OCR_THINKING). */
+export function levelFromName(name: string): string | null {
+  const m = name.match(/^([LMH])[-_ ]/i);
+  return m ? LEVELS[m[1].toUpperCase()] : null;
+}
+/** Tên tài liệu khi xuất kết quả: bỏ đuôi và tiền tố chọn mức. */
+export function docTitle(name: string): string {
+  return name.replace(/\.[^.]+$/, '').replace(/^[LMH][-_ ]/i, '') || name;
+}
 const RETRYABLE: ErrKind[] = ['transient', 'quota', 'too_big', 'bad_output', 'model_missing'];
 
 export class Worker {
@@ -141,7 +152,7 @@ export class Worker {
         const left = n - ok - bad;
         const eta = secs.length && left ? Math.round(secs.reduce((a, b) => a + b, 0) / secs.length * left / Math.max(1, this.cfg.concurrency) / 60) : null;
         const pct = Math.round(ok / n * 100);
-        data.current = { name: st.name, pages: st.pages, mode: st.mode, started, ok, total: n, bad, running: run, pct, etaMin: eta,
+        data.current = { name: st.name, pages: st.pages, mode: st.mode, thinking: levelFromName(st.name) || this.cfg.thinking, started, ok, total: n, bad, running: run, pct, etaMin: eta,
           chunks: st.chunks.map((c, i) => ({ part: i + 1, s: c.s, e: c.e, sec: c.sec || 0,
             status: c.running ? 'running' : c.status, error: c.status === 'error' ? c.error || '' : '' })) };
         txt.push(`File: ${st.name} — ${st.pages} trang, xong ${ok}/${n} phần (${pct}%)${bad ? `, lỗi ${bad}` : ''}` +
@@ -234,10 +245,12 @@ ${cur ? `<section>${cur}</section>` : ''}
       const done = st.chunks.filter(c => c.status === 'done').length;
       if (done) log(`↪️  ${name}: làm tiếp, đã xong ${done}/${st.chunks.length} phần từ lần trước`);
     }
-    log(`▶️  ${name}: ${pages} trang, ${st.chunks.length} phần, kiểu ${mode === 'html' ? 'Bảo toàn (HTML)' : 'DOCX'}, model ${this.cfg.model}`);
+    const thinking = levelFromName(name) || this.cfg.thinking || 'HIGH';
+    log(`▶️  ${name}: ${pages} trang, ${st.chunks.length} phần, kiểu ${mode === 'html' ? 'Bảo toàn (HTML)' : 'DOCX'}, ` +
+        `suy nghĩ ${thinking}${levelFromName(name) ? ' (theo tiền tố tên file)' : ''}`);
     this.saveState(st);
 
-    const ocr = new Ocr(this.cfg, this.pool, mode);
+    const ocr = new Ocr({ ...this.cfg, thinking }, this.pool, mode);
     this.current = { st, started: Date.now() };
     const progress = () => { if (this.current?.st === st) this.status(`Đang OCR ${name}`); };
     progress();
@@ -277,7 +290,7 @@ ${cur ? `<section>${cur}</section>` : ''}
       return 'partial';
     }
     for (const ext of ['.html', '.md', '.docx']) {            // bỏ bản "chưa đủ" của lần chạy trước
-      const old = join(this.d.output, `${name.replace(/\.[^.]+$/, '')} - CHUA-DU${ext}`);
+      const old = join(this.d.output, `${docTitle(name)} - CHUA-DU${ext}`);
       if (existsSync(old)) renameSync(old, join(this.d.state, `${this.stateId(name, size)}-cu${ext}`));
     }
     const skipped = (st.skipped || []).map(x => x.s === x.e ? `${x.s}` : `${x.s}-${x.e}`);
@@ -293,19 +306,19 @@ ${cur ? `<section>${cur}</section>` : ''}
   }
 
   async writeOutput(st: FileState, partial: boolean): Promise<string> {
-    const base = st.name.replace(/\.[^.]+$/, '') + (partial ? ' - CHUA-DU' : '');
+    const base = docTitle(st.name) + (partial ? ' - CHUA-DU' : '');
     const errBox = (c: ChunkState) => `<div style="border:2px solid #dc2626;border-radius:8px;padding:12px;margin:16px 0;color:#991b1b">` +
       `⚠️ Trang ${c.s}–${c.e} chưa OCR được: ${(c.error || '').replace(/</g, '&lt;')}</div>`;
     if (st.mode === 'html') {
       const content = st.chunks.map(c => c.status === 'done' ? MarkdownRenderer.renderHtmlContent(c.raw || '') : errBox(c))
         .join('<hr class="my-10 border-slate-200" />');
-      const html = generateHtmlDocument({ title: st.name.replace(/\.[^.]+$/, ''), content, profile: st.profile || undefined,
+      const html = generateHtmlDocument({ title: docTitle(st.name), content, profile: st.profile || undefined,
                                           subtitle: 'Trọn bộ tài liệu' } as any);
       return this.atomicWrite(this.uniquePath(this.d.output, base, '.html'), html);
     }
     const md = st.chunks.map(c => c.status === 'done' ? (c.raw || '') : `> ⚠️ Trang ${c.s}–${c.e} chưa OCR được: ${c.error}`).join('\n\n');
     this.atomicWrite(this.uniquePath(this.d.output, base, '.md'), md);
-    const docx = await markdownToDocx(st.name.replace(/\.[^.]+$/, ''), md);
+    const docx = await markdownToDocx(docTitle(st.name), md);
     return this.atomicWrite(this.uniquePath(this.d.output, base, '.docx'), docx);
   }
 
