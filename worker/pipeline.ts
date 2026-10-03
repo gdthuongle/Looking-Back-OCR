@@ -161,6 +161,17 @@ export function validateOutput(text: string, s: number, e: number, mode: Mode): 
 /* ------------------------------------------------------------------ OCR 1 dải trang, tự xử lý lỗi */
 export class Ocr {
   maxPages: number;                 // cỡ khối tối đa cho file này; tự giảm khi khối lớn bị 503 lặp lại
+  skipped: { s: number; e: number; why: string }[] = [];   // trang bị AI từ chối vĩnh viễn, đã bỏ qua
+
+  /** Chỗ giữ cho trang bị bỏ qua: giữ dấu ngắt trang để bố cục/đánh số không lệch. */
+  skipMarker(s: number, e: number, why: string) {
+    const r = s === e ? `Trang ${s}` : `Trang ${s}–${e}`;
+    if (this.mode !== 'html') return `> ⚠️ ${r}: không OCR được (${why}) — đã bỏ qua.`;
+    let out = '';
+    for (let p = s; p <= e; p++) out += `<!-- PAGE_BREAK: ${p} -->\n`;
+    return out + `<div style="border:2px dashed #f59e0b;border-radius:8px;padding:10px 14px;margin:12px 0;color:#92400e;background:#fffbeb">` +
+      `⚠️ ${r}: không OCR được (${why.replace(/</g, '&lt;')}) — đã bỏ qua, xem trang này trong bản gốc.</div>`;
+  }
   constructor(public cfg: Cfg, public pool: KeyPool, public mode: Mode) { this.maxPages = cfg.chunkPages; }
   private prompt(name: string) { return readFileSync(join(this.cfg.promptsDir, name), 'utf8'); }
   private get sleep() { return this.cfg.sleep || sleepReal; }
@@ -207,13 +218,23 @@ export class Ocr {
   async ocrRange(src: PDFDocument, s: number, e: number, profile: DocumentStyleProfile | null, label: string): Promise<string> {
     const cfg = this.cfg;
     const promptName = this.mode === 'html' ? 'html_reflow_instructions.md' : 'markdown_reflow_instructions.md';
-    let model = await this.pool.pickWait(), tries = 0, odd = 0, total = 0;
+    let model = await this.pool.pickWait(), tries = 0, odd = 0, total = 0, refusals = 0;
     const split = async (why: string) => {
       const mid = Math.floor((s + e) / 2);
       if (why) cfg.log(`✂️  ${label} trang ${s}-${e}: ${why} -> chia đôi (${s}-${mid} | ${mid + 1}-${e})`);
-      const a = await this.ocrRange(src, s, mid, profile, label);
-      const b = await this.ocrRange(src, mid + 1, e, profile, label);
-      return `${a}\n${b}`;
+      const part = async (a: number, b: number) => {
+        try {
+          return await this.ocrRange(src, a, b, profile, label);
+        } catch (err: any) {
+          if (err instanceof GeminiError && (err.kind === 'refused' || err.kind === 'bad_output')) {
+            cfg.log(`⏭️  ${label}: bỏ qua trang ${a}${b > a ? '-' + b : ''} (${err.message}), giữ các trang còn lại`);
+            this.skipped.push({ s: a, e: b, why: err.message });
+            return this.skipMarker(a, b, err.message);
+          }
+          throw err;
+        }
+      };
+      return `${await part(s, mid)}\n${await part(mid + 1, e)}`;
     };
     const exhausted = new Set<string>();                         // model đã thử hết lượt cho dải trang này
     const switchModel = (why: string) => {
@@ -250,7 +271,7 @@ export class Ocr {
               return split(`${g.message.slice(0, 40)}… lặp lại với khối ${e - s + 1} trang`);
             }
             if (total >= cfg.maxTries * this.pool.models.length) throw g;    // đã thử đủ nhiều trên mọi model
-            const next = await this.pool.pickWait();                         // đổi ngay sang model khác đang rảnh
+            const next = await this.pool.pickWait(exhausted);                // đổi ngay sang model khác đang rảnh (trừ model đã từ chối)
             if (next !== model) cfg.log(`🔀 ${label} trang ${s}-${e}: ${model} quá tải -> ${next}`);
             model = next;
             continue;
@@ -262,6 +283,10 @@ export class Ocr {
             throw g;
           case 'refused':
           case 'bad_output':
+            if (++refusals >= 3) {                                     // bị từ chối nhiều lần: cô lập trang có vấn đề
+              if (e > s) return split(`bị từ chối ${refusals} lần`);
+              throw g;                                                 // 1 trang vẫn bị từ chối: bỏ trang này (đánh dấu lỗi)
+            }
             if (++odd <= 1) { await this.sleep(this.backoff(1)); continue; }   // thử lại 1 lần với cùng model
             if (switchModel(g.message)) { odd = 0; continue; }
             if (e > s) return split(g.message);

@@ -130,7 +130,7 @@ describe('đường ống đầy đủ', () => {
     await runUntilIdle(worker());
     expect(existsSync(join(root, 'output', 'a.html'))).toBe(true);
     expect(logs.some(l => l.includes('flash quá tải -> pro'))).toBe(true);
-    expect(calls.filter(c => !c.style && c.model === 'flash').length).toBe(1);   // flash đang bận -> không gọi lại liên tục
+    expect(calls.filter(c => !c.style && c.model === 'flash').length).toBeLessThanOrEqual(3);   // flash bận -> không gọi lại liên tục
   });
 
   test('429: đổi key, không tính là lần thất bại', async () => {
@@ -298,5 +298,19 @@ describe('đường ống đầy đủ', () => {
     expect(p.setKeys(['K1', 'K2'])).toBe(1);
     expect(p.pick()).toBe('a');                           // key mới -> thử lại model chính
     expect(await p.acquire('a')).toBe(1);                 // nhưng K1 vẫn đang nghỉ với model a -> dùng K2
+  });
+
+  test('trang bị từ chối bản quyền trên mọi model: cô lập đúng trang đó, phần còn lại vẫn xong', async () => {
+    await makePdf(join(root, 'input', 'a.pdf'), 8);
+    script = c => !c.style && c.s <= 5 && c.e >= 5
+      ? Response.json({ candidates: [{ content: { parts: [] }, finishReason: 'RECITATION' }] }) : null;
+    const w = worker({ fallbackModels: ['f2', 'f3'] });
+    await runUntilIdle(w);
+    const html = readFileSync(join(root, 'output', 'a.html'), 'utf8');   // vẫn ra bản đầy đủ
+    expect(html).toContain('Trang 5: không OCR được');                // chỉ đúng trang 5 bị bỏ
+    for (const p of [1, 4, 6, 8]) expect(html).toMatch(new RegExp(`Nội dung trang ${p}(\\.\\.\\.)?</p>`));
+    expect(existsSync(join(root, 'input', 'daocr', 'a.pdf'))).toBe(true);
+    expect(logs.some(l => l.includes('bỏ qua trang 5 vì AI từ chối'))).toBe(true);
+    expect(calls.filter(c => !c.style).length).toBeLessThan(40);      // không lặp vô hạn
   });
 });

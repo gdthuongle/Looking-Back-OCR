@@ -23,6 +23,7 @@ interface FileState {
   name: string; size: number; mode: Mode; pages: number;
   chunks: ChunkState[]; profile?: DocumentStyleProfile | null;
   fails: number; lastFail?: number; lastKind?: ErrKind; created: number;
+  skipped?: { s: number; e: number; why: string }[];
 }
 
 const EXT = new Set(['.pdf', '.jpg', '.jpeg', '.png']);
@@ -245,7 +246,8 @@ ${cur ? `<section>${cur}</section>` : ''}
         st.profile = await ocr.styleProfile(src, st.chunks);
         this.saveState(st);
       }
-      await runChunks(ocr, src, st.chunks, st.profile || null, () => { this.saveState(st!); progress(); });
+      ocr.skipped = st.skipped || [];
+      await runChunks(ocr, src, st.chunks, st.profile || null, () => { st!.skipped = ocr.skipped; this.saveState(st!); progress(); });
     } catch (e: any) {
       const kind: ErrKind = e instanceof GeminiError ? e.kind : 'fatal';
       this.current = null;
@@ -278,7 +280,8 @@ ${cur ? `<section>${cur}</section>` : ''}
       const old = join(this.d.output, `${name.replace(/\.[^.]+$/, '')} - CHUA-DU${ext}`);
       if (existsSync(old)) renameSync(old, join(this.d.state, `${this.stateId(name, size)}-cu${ext}`));
     }
-    log(`🎉 ${name}: xong -> ${outPath}`);
+    const skipped = (st.skipped || []).map(x => x.s === x.e ? `${x.s}` : `${x.s}-${x.e}`);
+    log(`🎉 ${name}: xong -> ${outPath}` + (skipped.length ? ` (bỏ qua trang ${skipped.join(', ')} vì AI từ chối)` : ''));
     this.finish(path, 'done', '', st);
     return 'done';
   }
