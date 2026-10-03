@@ -354,4 +354,13 @@ describe('đường ống đầy đủ', () => {
     expect(readFileSync(join(root, 'output', 'b.md'), 'utf8')).toContain('ảnh trang 3 bản gốc');
     expect(existsSync(join(root, 'input', 'daocr', 'b.pdf'))).toBe(true);
   });
+
+  test('số trang AI ghi lệch (theo số in trên sách) được đánh lại đúng trang PDF', async () => {
+    const { fixPageMarks } = await import('./pipeline');
+    const raw = '<!-- PAGE_BREAK: 8 -->a<!--PAGE_BREAK: 9-->b<!-- PAGE_BREAK: 10 -->c';
+    expect(fixPageMarks(raw, 9, 11)).toBe('<!-- PAGE_BREAK: 9 -->a<!-- PAGE_BREAK: 10 -->b<!-- PAGE_BREAK: 11 -->c');
+    expect(fixPageMarks('<!-- PAGE_BREAK: 1 -->x', 5, 6)).toBe('<!-- PAGE_BREAK: 1 -->x');   // thiếu dấu -> giữ nguyên
+    expect(fixPageMarks('<!-- PAGE_BREAK: 1 -->trang một dài<!-- PAGE_BREAK: 16 -->146<!-- PAGE_BREAK: 2 -->trang hai dài', 5, 6))
+      .toBe('<!-- PAGE_BREAK: 5 -->trang một dài146<!-- PAGE_BREAK: 6 -->trang hai dài');               // dấu thừa ít chữ bị bỏ
+  });
 });

@@ -168,6 +168,26 @@ export async function slicePdf(src: PDFDocument, s: number, e: number): Promise<
   return Buffer.from(await sub.save()).toString('base64');
 }
 
+/** AI hay ghi số trang IN TRÊN SÁCH (thường lệch 1 so với PDF) hoặc đếm lại từ 1. Ta biết chính xác đã gửi trang s..e:
+ *  nếu số dấu ngắt trang khớp số trang -> đánh lại đúng s..e theo thứ tự. */
+export function fixPageMarks(text: string, s: number, e: number): string {
+  const re = /<!--\s*PAGE_BREAK:\s*\d+\s*-->/g;
+  const want = e - s + 1;
+  let marks = [...text.matchAll(re)].map(m => ({ i: m.index!, len: m[0].length, body: 0 }));
+  if (marks.length < want) return text;
+  if (marks.length > want) {                 // dấu thừa (thường là số trang in bị hiểu nhầm): bỏ các dấu kèm ít chữ nhất
+    marks.forEach((m, k) => {
+      const end = k + 1 < marks.length ? marks[k + 1].i : text.length;
+      m.body = text.slice(m.i + m.len, end).replace(/<[^>]+>/g, '').replace(/\s+/g, '').length;
+    });
+    const drop = new Set([...marks].sort((a, b) => a.body - b.body).slice(0, marks.length - want).map(m => m.i));
+    marks = marks.filter(m => !drop.has(m.i));
+    text = text.replace(re, (m0, off: number) => (drop.has(off) ? '' : m0));
+  }
+  let p = s;
+  return text.replace(re, () => `<!-- PAGE_BREAK: ${p++} -->`);
+}
+
 const REFUSAL = /^(tôi (không thể|xin lỗi|rất tiếc)|xin lỗi|i('m| am) sorry|i can(no|')t|sorry,)/i;
 
 /** Phát hiện kết quả hỏng dù API báo thành công. */
@@ -282,7 +302,7 @@ export class Ocr {
         const bad = validateOutput(r.text, s, e, this.mode);
         if (bad) throw new GeminiError('bad_output', bad);
         this.pool.markOk(model);
-        return r.text;
+        return this.mode === 'html' ? fixPageMarks(r.text, s, e) : r.text;
       } catch (err: any) {
         const g = err instanceof GeminiError ? err : new GeminiError('transient', `${err?.name || 'Error'}: ${err?.message || err}`);
         cfg.log(`⚠️  ${label} trang ${s}-${e} [${model}]: ${g.kind} — ${g.message.slice(0, 200)}`);
