@@ -99,6 +99,9 @@ dạng `AIza…`. Key sai: file **vẫn nằm trong hàng đợi** (không bị 
 | AI từ chối (bản quyền/an toàn), trả lời linh tinh | Thử lại, rồi đổi model, rồi chia nhỏ |
 | Hồ sơ thiết kế không phân tích được | Thử 3 lần, rồi dùng hồ sơ mặc định (ghi rõ trong nhật ký) |
 
+- **Trang AI từ chối (bản quyền, an toàn…)**: worker chia nhỏ để cô lập đúng trang đó, các trang khác vẫn OCR bình thường.
+  Trang bị từ chối được **thay bằng ảnh chụp trang gốc** (cả trong .docx và .html) kèm ghi chú vàng, nên bản xuất đủ nội dung;
+  file vẫn tính là xong (`input/daocr/`), nhật ký ghi rõ những trang đã thay bằng ảnh. Trong `.md` chỉ có ghi chú (ảnh nằm trong .docx).
 - **Lưu tiến độ theo từng phần**: máy khởi động lại, worker dừng giữa chừng → làm tiếp, phần đã xong không gọi lại.
 - **Lỗi một phần**: các phần lỗi được làm lại khi file chạy lại; phần đã xong giữ nguyên, không tốn thêm lượt.
 - **Tự thử lại file lỗi**: lỗi tạm thời (quá tải, hạn mức…) → file trong `input/loi/` tự quay lại hàng đợi sau 2 giờ,
@@ -107,7 +110,7 @@ dạng `AIza…`. Key sai: file **vẫn nằm trong hàng đợi** (không bị 
 
 ## Quản trị worker
     docker logs -f pdfocr-worker                 # xem trực tiếp
-    docker restart pdfocr-worker                 # sau khi sửa ocr.env
+    /opt/pdfocr-deploy/run-worker.sh             # tạo lại container worker (bun + pdftoppm), không mất tiến độ
     docker stop pdfocr-worker                    # tạm dừng (tiến độ đã lưu)
     cd /opt/pdfocr && bun test worker/           # chạy bộ test (máy chủ Gemini giả, không tốn quota)
 
