@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Chuyển kết quả OCR kiểu "Bảo toàn" (HTML từng phần, lưu trong .ocr-state/*.json) sang Markdown chữ thuần.
+"""Chuyển kết quả OCR kiểu "Bảo toàn" sang Markdown chữ thuần: từ .ocr-state/*.json (bản thô từng phần)
+hoặc từ file .html hoàn chỉnh (bản worker/web xuất ra; xem html_file_to_md và chuyen-html-md.py).
 
 Không gọi AI. Giữ: tiêu đề, đoạn, đậm/nghiêng, danh sách, bảng, công thức $...$ (lấy từ bản thô, chưa đổi sang MathML),
 đánh dấu [Trang N] đầu mỗi trang. Bỏ: CSS, bố cục, thẻ ảnh (AI không trích được ảnh thật, các thẻ <img> đều vỡ).
@@ -8,6 +9,7 @@ Cách dùng:
   python3 tools/html2md.py <file .ocr-state/xxx.json> <file ra .md>
   python3 tools/html2md.py --name "Toan_3_Tap_1" <file ra .md>     # tìm theo một phần tên file PDF
 """
+import base64
 import glob
 import json
 import os
@@ -22,6 +24,34 @@ BLOCK = {'p', 'div', 'section', 'article', 'header', 'footer', 'aside', 'main', 
 SKIP = {'style', 'script', 'head', 'title', 'meta', 'link', 'svg', 'img', 'button', 'input', 'select', 'noscript'}
 
 
+_IMAGES = None        # khi đổi file .html: list [(tên file, bytes)] nhận ảnh data: (ảnh trang gốc) để tách ra file
+_IMG_PREFIX = 'anh'
+
+
+def math_text(n):
+    """MathML -> chữ một dòng: 385 = 300 + 80 + 5, a/b, x^2, √(x)."""
+    if isinstance(n, NavigableString):
+        return str(n).strip()
+    if not isinstance(n, Tag) or n.name in ('annotation', 'annotation-xml'):
+        return ''
+    k = [c for c in n.children if isinstance(c, Tag)]
+    if n.name == 'mfrac' and len(k) == 2:
+        a, b = math_text(k[0]), math_text(k[1])
+        return f'{a}/{b}' if len(a) <= 3 and len(b) <= 3 else f'({a})/({b})'
+    if n.name in ('msup', 'msub') and len(k) == 2:
+        return math_text(k[0]) + ('^' if n.name == 'msup' else '_') + math_text(k[1])
+    if n.name == 'msqrt':
+        return '√(' + ''.join(math_text(c) for c in n.children) + ')'
+    if n.name == 'mroot' and len(k) == 2:
+        return f'{math_text(k[1])}√({math_text(k[0])})'
+    if n.name == 'mo':
+        op = n.get_text().strip()
+        return f' {op} ' if op in ('=', '+', '−', '-', '×', ':', '<', '>', '≤', '≥', '≠', '÷', '·') else op
+    if n.name in ('mn', 'mi', 'mtext', 'ms'):
+        return n.get_text()
+    return ''.join(math_text(c) for c in n.children)
+
+
 def norm(s):
     return re.sub(r'\s+', ' ', s)
 
@@ -32,6 +62,25 @@ def inline(node):
         return ''
     if isinstance(node, NavigableString):
         return norm(str(node))
+    if isinstance(node, Tag) and node.name == 'math':
+        return ' ' + re.sub(r'\s+', ' ', math_text(node)).strip() + ' '
+    if isinstance(node, Tag) and node.name == 'img':
+        src = node.get('src', '')
+        alt = norm(node.get('alt', '')).strip()
+        m = re.match(r'data:image/(png|jpe?g|webp|gif);base64,(.+)', src, re.S)
+        if m and _IMAGES is not None:
+            try:
+                data = base64.b64decode(m.group(2))
+            except ValueError:
+                data = b''
+            if len(data) >= 5000:                            # ảnh thật nhúng trong file (vd ảnh trang gốc) -> tách ra file
+                name = f'{_IMG_PREFIX}-{len(_IMAGES) + 1}.{m.group(1).replace("jpeg", "jpg")}'
+                _IMAGES.append((name, data))
+                return f'\n![{alt or "ảnh"}]({name})\n'
+        # ảnh AI "bịa" (src="#", page1_img1.png, biểu tượng/ảnh rỗng): bỏ ảnh, giữ lời mô tả nếu có nghĩa
+        if len(alt) > 3 and alt.lower() not in ('icon', 'image', 'ảnh', 'hình', 'logo', 'hình ảnh'):
+            return f' [Hình: {alt}] '
+        return ''
     if not isinstance(node, Tag) or node.name in SKIP:
         return ''
     if node.name == 'br':
@@ -100,7 +149,7 @@ def blocks(node, out, quote=False):
         if isinstance(c, NavigableString):
             buf.append(norm(str(c)))
             continue
-        if not isinstance(c, Tag) or c.name in SKIP:
+        if not isinstance(c, Tag) or (c.name in SKIP and c.name != 'img'):
             continue
         name = c.name
         if name == 'page-mark':
@@ -130,6 +179,7 @@ def blocks(node, out, quote=False):
             blocks(c, out, quote=True)
         elif name == 'hr':
             flush()
+            blocks(c, out, quote)          # html.parser đôi khi lồng phần sau vào trong <hr> -> vẫn phải đọc tiếp
         elif name == 'pre':
             flush()
             out.append('```\n' + c.get_text().strip('\n') + '\n```')
@@ -147,6 +197,30 @@ def chunk_to_md(raw):
     out = []
     blocks(soup, out)
     return out
+
+
+def html_file_to_md(html, title, img_prefix):
+    """File .html hoàn chỉnh (worker/web) -> (markdown, [(tên ảnh, bytes)])."""
+    global _IMAGES, _IMG_PREFIX
+    soup = BeautifulSoup(html, 'html.parser')
+    for t in soup.select('.no-print, script, style, head'):
+        t.decompose()
+    for d in soup.select('[data-page]'):                    # mốc trang của bản HTML -> [Trang N]
+        mark = soup.new_tag('page-mark')
+        mark['n'] = d['data-page']
+        d.replace_with(mark)
+    root = soup.select_one('article.doc-content') or soup.body or soup
+    _IMAGES, _IMG_PREFIX = [], img_prefix
+    try:
+        out = []
+        blocks(root, out)
+        images = _IMAGES
+    finally:
+        _IMAGES = None
+    parts = [f'# {title}', f'> Nguồn: chuyển từ `{title}.html` (kết quả OCR). Có thể sai sót — đối chiếu bản gốc trước khi '
+             'dùng làm đáp án. `[Trang N]` = số trang trong file PDF gốc.'] + out
+    md = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts)).strip() + '\n'
+    return md, images
 
 
 def convert(state_path, out_path):
