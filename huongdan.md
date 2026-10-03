@@ -13,7 +13,10 @@ file PDF và API key không đi qua máy chủ này, trình duyệt gửi thẳn
 2. Mở ứng dụng → nhập API key (lưu trong localStorage của trình duyệt đó, máy khác phải nhập lại).
 
 ## Chuyển một cuốn sách
-1. Tải lên PDF (≤100MB, ≤500 trang) **hoặc** nhiều ảnh JPG/PNG (≤100 ảnh, ≤5MB/ảnh). Không trộn PDF với ảnh.
+1. Tải lên PDF (**không giới hạn số trang/dung lượng** — file trên 100MB vẫn chạy nhưng trình duyệt chậm, tốn RAM;
+   file rất lớn nên dùng Xử lý tự động) **hoặc** nhiều ảnh JPG/PNG (≤100 ảnh, ≤5MB/ảnh). Không trộn PDF với ảnh.
+   **Số trang mỗi phần** (cột trái, cạnh nút DOCX/Bảo toàn; mặc định 12, nhớ cho lần sau): nhỏ hơn = mỗi lần gửi
+   nhẹ hơn, ít bị lỗi 503, nhưng tốn nhiều lượt gọi hơn. Chỉ đổi được trước khi bắt đầu xử lý.
    Nhiều PDF cùng lúc: ≤20 file, mỗi file ≤12 trang, ≤10MB.
 2. Chọn model: **Flash** (mặc định, nhanh, miễn phí ~150–200 trang/ngày/tài khoản), **Pro** (cấu trúc phức tạp,
    hết lượt miễn phí sớm hơn), **Meta** (khi Gemini từ chối vì tưởng còn bản quyền).
@@ -57,13 +60,13 @@ Nhận file `.pdf`, `.jpg`, `.png` (mỗi ảnh thành một tài liệu riêng)
 - Xong: file gốc chuyển vào `input/daocr/`.
 - Lỗi: file gốc chuyển vào `input/loi/`, kèm `<tên>.loi.txt` ghi lý do. Phần đã OCR được vẫn xuất ra
   `output/<tên> - CHUA-DU.html`, chỗ thiếu có khung đỏ "chưa OCR được".
-- **Theo dõi tiến trình** (tự làm mới mỗi 10 giây): **http://192.168.1.209:8095/ocr/** (Tailscale: http://100.105.115.14:8095/ocr/)
+- **Theo dõi tiến trình**: nút **"Tự động"** trên thanh đầu trang của bản web (chỉ hiện khi máy chủ có worker), hoặc trang **http://192.168.1.209:8095/ocr/** (Tailscale: http://100.105.115.14:8095/ocr/)
   — file đang làm, % và thời gian còn lại, trạng thái từng phần, hàng đợi, file lỗi kèm giờ tự thử lại,
   nhật ký, và link tải kết quả. Không có trình duyệt thì xem `output/_trangthai.txt`, `output/_nhatky.log`.
 
 ## Cài đặt lần đầu: điền API key
     nano /opt/pdfocr-deploy/ocr.env        # GEMINI_API_KEYS=key1,key2,...   (nhiều key -> tự xoay khi hết hạn mức)
-Worker tự nhận key mới sau tối đa 1 phút (không cần restart). Key đúng tạo ở https://aistudio.google.com/api-keys,
+Worker tự nhận thay đổi trong `ocr.env` sau tối đa 30 giây, **kể cả khi đang xử lý** (không cần restart, không mất tiến độ). Key đúng tạo ở https://aistudio.google.com/api-keys,
 dạng `AIza…`. Key sai: file **vẫn nằm trong hàng đợi** (không bị coi là lỗi), sửa key là chạy tiếp.
 
 ## Model và hạn mức (key miễn phí)
@@ -99,3 +102,15 @@ dạng `AIza…`. Key sai: file **vẫn nằm trong hàng đợi** (không bị 
 
 Mã nguồn worker: `/opt/pdfocr/worker/` (dùng lại prompt và bộ dựng HTML/DOCX của ứng dụng web, nên
 `update.sh` cập nhật bản mới thì worker cũng được hưởng). Cấu hình: `/opt/pdfocr-deploy/ocr.env`.
+
+## Web và xử lý tự động: độc lập
+- Bản web chạy trong trình duyệt (key, lịch sử lưu trong trình duyệt). Worker chạy trên máy chủ (key trong `ocr.env`,
+  tiến độ trong `.ocr-state/`). Hai bên không chia sẻ việc đang làm; file tải lên web không vào hàng đợi worker.
+- Dùng chung: prompt, bộ dựng HTML/DOCX -> **kết quả cùng định dạng**. Khác biệt nhỏ: worker ghi thêm `.md` khi xuất
+  DOCX, phần lỗi được đánh dấu khung đỏ trong bản `- CHUA-DU`, và mỗi file là một tài liệu riêng (web có chế độ
+  nhiều file gộp thành gói .zip).
+- Dùng chung **hạn mức** nếu dùng cùng key/project: chạy song song web và worker sẽ ăn chung 20 lượt/ngày/model.
+
+## Cập nhật bản mới
+    /opt/pdfocr-deploy/update.sh
+Giữ các bản sửa tại máy (git commit "Bản sửa tại máy…", lấy bản GitHub rồi đặt bản sửa lên trên). Nếu xung đột thì dừng, không đổi gì.
