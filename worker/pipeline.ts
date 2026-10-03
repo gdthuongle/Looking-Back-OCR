@@ -18,6 +18,7 @@ export interface Cfg {
   backoffMaxMs: number;
   quotaWaitMs: number;        // chờ khi mọi key đều hết hạn mức mà Google không nói rõ bao lâu
   timeoutMs: number;
+  thinking?: string;          // mức suy nghĩ của Gemini (bản web: HIGH)
   promptsDir: string;
   log: (msg: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -36,7 +37,18 @@ export class KeyPool {
   private bannedKeys = new Set<string>();
   private next = 0;
   modelBlocked = new Map<string, number>();            // model -> hết bị chặn lúc
-  preferFallbackUntil = 0;                             // model chính vừa quá tải -> tạm ưu tiên dự phòng
+  preferFallbackUntil = 0;                             // (giữ để tương thích trang theo dõi; không còn dùng để chọn model)
+  busyUntil = new Map<string, number>();               // model vừa trả 503 -> tạm tránh tới lúc này
+  private busyStreak = new Map<string, number>();
+  lastGood = '';                                       // model vừa chạy thành công -> ưu tiên dùng tiếp
+  /** Model trả 503: tạm tránh theo OCR_BACKOFF_SECONDS × 1, 2, 4… (tối đa OCR_BACKOFF_MAX_SECONDS). */
+  markBusy(m: string) {
+    const n = (this.busyStreak.get(m) || 0) + 1;
+    this.busyStreak.set(m, n);
+    this.busyUntil.set(m, Date.now() + Math.min(this.cfg.backoffMaxMs, this.cfg.backoffBaseMs * 2 ** (n - 1)));
+  }
+  markOk(m: string) { this.busyStreak.delete(m); this.busyUntil.delete(m); this.lastGood = m; }
+  isBusy(m: string) { return (this.busyUntil.get(m) || 0) > Date.now(); }
   usage: Record<string, Record<string, number>> = {};  // ngày (giờ Mỹ, Google tính hạn mức theo đó) -> model -> số lần gọi
   static day() { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' }); }
   record(model: string) {
@@ -92,19 +104,22 @@ export class KeyPool {
   blockModel(m: string, ms: number) { this.modelBlocked.set(m, Date.now() + ms); }
   /** Model nên dùng lúc này: chính, hoặc dự phòng nếu chính đang bị chặn / vừa quá tải. */
   get models() { return [this.cfg.model, ...this.cfg.fallbackModels.filter(m => m && m !== this.cfg.model)]; }
-  pick(): string | null {
-    const [main, ...fb] = this.models;
-    const order = fb.length && this.preferFallbackUntil > Date.now() ? [...fb, main] : [main, ...fb];
-    return order.find(m => this.modelOk(m)) || null;
+  /** Model nên dùng: model vừa chạy tốt, rồi theo thứ tự cấu hình; bỏ qua model hết lượt hoặc đang quá tải. */
+  pick(exclude: Set<string> = new Set()): string | null {
+    const order = this.lastGood && this.models.includes(this.lastGood)
+      ? [this.lastGood, ...this.models.filter(m => m !== this.lastGood)] : this.models;
+    return order.find(m => !exclude.has(m) && this.modelOk(m) && !this.isBusy(m)) || null;
   }
-  /** Chờ tới khi có model dùng được. */
-  async pickWait(): Promise<string> {
+  /** Chờ tới khi có model dùng được (chỉ chờ khi MỌI model đều hết lượt hoặc đang quá tải). */
+  async pickWait(exclude: Set<string> = new Set()): Promise<string> {
     for (;;) {
-      const m = this.pick();
+      const m = this.pick(exclude);
       if (m) return m;
-      const ms = this.models.map(x => this.modelBlocked.get(x) || 0);
-      const wait = Math.max(5000, Math.min(...ms) - Date.now());
-      this.cfg.log(`⏳ không model nào dùng được lúc này, chờ ${Math.round(wait / 60000)} phút`);
+      const cand = this.models.filter(x => !exclude.has(x) && this.modelOk(x));
+      if (!cand.length && exclude.size) return this.pickWait();             // mọi model còn lại đều bị loại: bỏ loại trừ
+      const ts = cand.length ? cand.map(x => this.busyUntil.get(x) || 0) : this.models.map(x => this.modelBlocked.get(x) || 0);
+      const wait = Math.max(5000, Math.min(...ts) - Date.now());
+      this.cfg.log(`⏳ mọi model đều ${cand.length ? 'đang quá tải' : 'hết lượt'}, chờ ${wait >= 120_000 ? Math.round(wait / 60000) + ' phút' : Math.round(wait / 1000) + 's'}`);
       await (this.cfg.sleep || sleepReal)(wait);
     }
   }
@@ -162,7 +177,7 @@ export class Ocr {
       this.pool.record(model);
       try {
         return await callGemini({ baseUrl: this.cfg.baseUrl, key: this.pool.key(i), model, parts, system, json,
-                                  timeoutMs: this.cfg.timeoutMs });
+                                  timeoutMs: this.cfg.timeoutMs, thinking: this.cfg.thinking });
       } catch (e: any) {
         if (e instanceof GeminiError && e.kind === 'quota') {
           const zero = /limit:\s*0\b/.test(e.message);                   // key không được dùng model này (vd Pro với key miễn phí)
@@ -192,7 +207,7 @@ export class Ocr {
   async ocrRange(src: PDFDocument, s: number, e: number, profile: DocumentStyleProfile | null, label: string): Promise<string> {
     const cfg = this.cfg;
     const promptName = this.mode === 'html' ? 'html_reflow_instructions.md' : 'markdown_reflow_instructions.md';
-    let model = await this.pool.pickWait(), tries = 0, odd = 0;
+    let model = await this.pool.pickWait(), tries = 0, odd = 0, total = 0;
     const split = async (why: string) => {
       const mid = Math.floor((s + e) / 2);
       if (why) cfg.log(`✂️  ${label} trang ${s}-${e}: ${why} -> chia đôi (${s}-${mid} | ${mid + 1}-${e})`);
@@ -205,7 +220,6 @@ export class Ocr {
       exhausted.add(model);
       const to = this.pool.models.find(m => !exhausted.has(m) && this.pool.modelOk(m));
       if (!to) return false;
-      if (model === cfg.model) this.pool.preferFallbackUntil = Date.now() + 15 * 60_000;   // các khối sau dùng luôn dự phòng 15 phút
       cfg.log(`🔀 ${label} trang ${s}-${e}: ${why} -> đổi sang ${to}`);
       model = to; tries = 0;
       return true;
@@ -219,6 +233,7 @@ export class Ocr {
         const r = await this.call(model, parts, system);
         const bad = validateOutput(r.text, s, e, this.mode);
         if (bad) throw new GeminiError('bad_output', bad);
+        this.pool.markOk(model);
         return r.text;
       } catch (err: any) {
         const g = err instanceof GeminiError ? err : new GeminiError('transient', `${err?.name || 'Error'}: ${err?.message || err}`);
@@ -226,20 +241,18 @@ export class Ocr {
         if (g.kind === 'auth') throw g;
         switch (g.kind) {
           case 'transient': {
-            tries++;
+            tries++; total++;
+            this.pool.markBusy(model);
             const minP = cfg.minChunkPages ?? 3;
             if (e - s + 1 > minP && tries >= 3) {                       // khối lớn bị 503 lặp lại: gửi nhỏ hơn hiệu quả hơn chờ
               this.maxPages = Math.max(minP, Math.min(this.maxPages, Math.ceil((e - s + 1) / 2)));
               cfg.log(`📉 từ giờ dùng khối tối đa ${this.maxPages} trang cho file này`);
               return split(`${g.message.slice(0, 40)}… lặp lại với khối ${e - s + 1} trang`);
             }
-            if (tries >= cfg.maxTries) {
-              if (switchModel(`lỗi tạm thời ${tries} lần liền`)) continue;
-              throw g;
-            }
-            const w = this.backoff(tries);
-            cfg.log(`   chờ ${Math.round(w / 1000)}s rồi thử lại (lần ${tries + 1}/${cfg.maxTries})`);
-            await this.sleep(w);
+            if (total >= cfg.maxTries * this.pool.models.length) throw g;    // đã thử đủ nhiều trên mọi model
+            const next = await this.pool.pickWait();                         // đổi ngay sang model khác đang rảnh
+            if (next !== model) cfg.log(`🔀 ${label} trang ${s}-${e}: ${model} quá tải -> ${next}`);
+            model = next;
             continue;
           }
           case 'too_big':

@@ -377,6 +377,7 @@ export function cfgFromEnv(log: (m: string) => void): Cfg {
     backoffMaxMs: num('OCR_BACKOFF_MAX_SECONDS', 600) * 1000,
     quotaWaitMs: num('OCR_QUOTA_WAIT_SECONDS', 60) * 1000,
     timeoutMs: num('OCR_TIMEOUT_SECONDS', 600) * 1000,
+    thinking: (e.OCR_THINKING || 'HIGH').toUpperCase(),
     promptsDir: e.OCR_PROMPTS_DIR || join(import.meta.dir, '..', 'public', 'prompts'),
     log,
   };

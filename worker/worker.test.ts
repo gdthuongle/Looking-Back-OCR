@@ -56,7 +56,7 @@ function worker(over: Partial<Cfg> = {}) {
     baseUrl: `http://localhost:${server.port}`, keys: ['K1', 'K2'], model: 'flash', fallbackModels: ['pro'],
     concurrency: 2, chunkPages: 12, maxTries: 3, backoffBaseMs: 1, backoffMaxMs: 5, quotaWaitMs: 50,
     timeoutMs: 5000, promptsDir: join(import.meta.dir, '..', 'public', 'prompts'),
-    log: m => logs.push(m), sleep: async () => {}, ...over,
+    log: m => { logs.push(m); if (process.env.DBG) console.log(m); }, sleep: async () => {}, ...over,
   };
   return new Worker(cfg, dirsFor(root), { stableMs: 0, retryFailedMs: 0, maxFileRetries: 3 });
 }
@@ -120,7 +120,8 @@ describe('đường ống đầy đủ', () => {
     script = c => !c.style && c.n <= 2 ? err(503, 'UNAVAILABLE', 'The model is overloaded') : null;
     await runUntilIdle(worker());
     expect(existsSync(join(root, 'output', 'a.html'))).toBe(true);
-    expect(calls.filter(c => !c.style && c.model === 'flash').length).toBe(3);
+    expect(calls.filter(c => !c.style).length).toBe(3);               // flash 503 -> pro 503 -> flash qua: không ngồi chờ
+    expect(logs.some(l => l.includes('flash quá tải -> pro'))).toBe(true);
   });
 
   test('503 kéo dài: đổi sang model dự phòng', async () => {
@@ -128,7 +129,8 @@ describe('đường ống đầy đủ', () => {
     script = c => c.model === 'flash' ? err(503, 'UNAVAILABLE', 'overloaded') : null;
     await runUntilIdle(worker());
     expect(existsSync(join(root, 'output', 'a.html'))).toBe(true);
-    expect(logs.some(l => l.includes('đổi sang pro'))).toBe(true);
+    expect(logs.some(l => l.includes('flash quá tải -> pro'))).toBe(true);
+    expect(calls.filter(c => !c.style && c.model === 'flash').length).toBe(1);   // flash đang bận -> không gọi lại liên tục
   });
 
   test('429: đổi key, không tính là lần thất bại', async () => {

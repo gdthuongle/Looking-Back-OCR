@@ -26,6 +26,7 @@ export interface CallOpts {
   system?: string;
   json?: boolean;
   timeoutMs: number;
+  thinking?: string;          // HIGH (như bản web) | MEDIUM | LOW | MINIMAL
 }
 
 const SAFETY = [
@@ -69,7 +70,7 @@ export function stripFences(text: string): string {
 export async function callGemini(o: CallOpts): Promise<GeminiResult> {
   const body: any = {
     contents: [{ parts: o.parts }],
-    generationConfig: { temperature: 0.1, thinkingConfig: { thinkingLevel: 'HIGH' } },
+    generationConfig: { temperature: 0.1, thinkingConfig: { thinkingLevel: o.thinking || 'HIGH' } },
     safetySettings: SAFETY,
   };
   if (o.json) body.generationConfig.responseMimeType = 'application/json';
