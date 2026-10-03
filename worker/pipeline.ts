@@ -1,5 +1,6 @@
 /* OCR một tài liệu PDF: chia khối như ứng dụng web, gọi Gemini với chiến lược xử lý lỗi tự động. */
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { callGemini, GeminiError, ErrKind } from './gemini';
@@ -125,6 +126,26 @@ export class KeyPool {
   }
 }
 
+/* ------------------------------------------------------------------ ảnh trang gốc (cho trang AI từ chối) */
+export const pageImgKey = (p: number) => `IMG-${p}`;                 // dạng chỗ giữ ảnh mà docx-exporter hiểu: ![IMG-12]
+export const pageImgComment = (p: number) => `<!--PAGE_IMG:${p}-->`;
+
+/** Dựng 1 trang PDF thành PNG bằng pdftoppm. Không có pdftoppm/lỗi -> null (chỉ còn ghi chú, không có ảnh). */
+export async function renderPagePng(src: PDFDocument, p: number, dpi = 110): Promise<{ dataUrl: string; width: number; height: number } | null> {
+  const dir = mkdtempSync(join(tmpdir(), 'ocr-pg-'));
+  try {
+    writeFileSync(join(dir, 'p.pdf'), Buffer.from(await slicePdf(src, p, p), 'base64'));
+    const r = Bun.spawnSync(['pdftoppm', '-r', String(dpi), '-png', '-singlefile', join(dir, 'p.pdf'), join(dir, 'out')]);
+    if (r.exitCode !== 0) return null;
+    const png = readFileSync(join(dir, 'out.png'));
+    return { dataUrl: `data:image/png;base64,${png.toString('base64')}`, width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+  } catch {
+    return null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /* ------------------------------------------------------------------ chia khối (giống pdf-processor.ts) */
 export function makeChunks(numPages: number, maxPages = 12): { s: number; e: number }[] {
   const out: { s: number; e: number }[] = [];
@@ -163,14 +184,20 @@ export class Ocr {
   maxPages: number;                 // cỡ khối tối đa cho file này; tự giảm khi khối lớn bị 503 lặp lại
   skipped: { s: number; e: number; why: string }[] = [];   // trang bị AI từ chối vĩnh viễn, đã bỏ qua
 
-  /** Chỗ giữ cho trang bị bỏ qua: giữ dấu ngắt trang để bố cục/đánh số không lệch. */
+  /** Chỗ giữ cho trang AI từ chối: ghi chú + chỗ chèn ẢNH trang gốc (dựng lúc xuất file) để đủ nội dung. */
   skipMarker(s: number, e: number, why: string) {
     const r = s === e ? `Trang ${s}` : `Trang ${s}–${e}`;
-    if (this.mode !== 'html') return `> ⚠️ ${r}: không OCR được (${why}) — đã bỏ qua.`;
+    if (this.mode !== 'html') {
+      let out = `> ⚠️ ${r}: AI không OCR được (${why}) — chèn ảnh trang gốc.\n\n`;
+      for (let p = s; p <= e; p++) out += `![${pageImgKey(p)}]\n\n`;
+      return out;
+    }
     let out = '';
-    for (let p = s; p <= e; p++) out += `<!-- PAGE_BREAK: ${p} -->\n`;
-    return out + `<div style="border:2px dashed #f59e0b;border-radius:8px;padding:10px 14px;margin:12px 0;color:#92400e;background:#fffbeb">` +
-      `⚠️ ${r}: không OCR được (${why.replace(/</g, '&lt;')}) — đã bỏ qua, xem trang này trong bản gốc.</div>`;
+    for (let p = s; p <= e; p++) {
+      out += `<!-- PAGE_BREAK: ${p} -->\n<div style="border:2px dashed #f59e0b;border-radius:8px;padding:10px 14px;margin:12px 0;color:#92400e;background:#fffbeb">` +
+        `⚠️ Trang ${p}: AI không OCR được (${why.replace(/</g, '&lt;')}) — dưới đây là ảnh trang gốc.</div>\n${pageImgComment(p)}\n`;
+    }
+    return out;
   }
   constructor(public cfg: Cfg, public pool: KeyPool, public mode: Mode) { this.maxPages = cfg.chunkPages; }
   private prompt(name: string) { return readFileSync(join(this.cfg.promptsDir, name), 'utf8'); }
@@ -353,6 +380,13 @@ export async function runChunks(ocr: Ocr, src: PDFDocument, chunks: ChunkState[]
         c.status = 'done'; c.error = undefined; c.kind = undefined; c.sec = Math.round((Date.now() - t0) / 1000);
         ocr.cfg.log(`✅ ${label} (trang ${c.s}-${c.e}) xong sau ${Math.round((Date.now() - t0) / 1000)}s`);
       } catch (err: any) {
+        if (err instanceof GeminiError && (err.kind === 'refused' || err.kind === 'bad_output')) {
+          ocr.cfg.log(`⏭️  ${label}: AI từ chối trang ${c.s}-${c.e} (${err.message}) -> chèn ảnh trang gốc`);
+          ocr.skipped.push({ s: c.s, e: c.e, why: err.message });
+          c.raw = ocr.skipMarker(c.s, c.e, err.message);
+          c.status = 'done'; c.error = undefined; c.kind = undefined;
+          continue;
+        }
         c.status = 'error';
         c.kind = err instanceof GeminiError ? err.kind : 'fatal';
         c.error = String(err?.message || err).slice(0, 300);

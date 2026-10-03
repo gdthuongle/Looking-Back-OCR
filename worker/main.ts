@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
-import { Cfg, ChunkState, KeyPool, makeChunks, Ocr, runChunks } from './pipeline';
+import { Cfg, ChunkState, KeyPool, makeChunks, Ocr, pageImgComment, pageImgKey, renderPagePng, runChunks } from './pipeline';
 import { GeminiError, ErrKind } from './gemini';
 import { DocumentStyleProfile, generateHtmlDocument, markdownToDocx, MarkdownRenderer, Mode } from './app-bridge';
 
@@ -279,7 +279,7 @@ ${cur ? `<section>${cur}</section>` : ''}
 
     this.current = null;
     const failed = st.chunks.filter(c => c.status !== 'done');
-    const outPath = await this.writeOutput(st, failed.length > 0);
+    const outPath = await this.writeOutput(st, failed.length > 0, src);
     if (failed.length) {
       st.fails++; st.lastFail = Date.now();
       st.lastKind = failed.every(c => c.kind && RETRYABLE.includes(c.kind)) ? 'transient' : (failed[0].kind || 'fatal');
@@ -305,20 +305,38 @@ ${cur ? `<section>${cur}</section>` : ''}
     return p;
   }
 
-  async writeOutput(st: FileState, partial: boolean): Promise<string> {
+  async writeOutput(st: FileState, partial: boolean, src?: PDFDocument): Promise<string> {
+    // Ảnh trang gốc cho các trang AI từ chối (để bản xuất đủ nội dung)
+    const imgs = new Map<number, { dataUrl: string; width: number; height: number }>();
+    if (src) {
+      for (const x of st.skipped || []) {
+        for (let p = x.s; p <= x.e; p++) {
+          if (imgs.has(p)) continue;
+          const im = await renderPagePng(src, p);
+          if (im) imgs.set(p, im); else this.cfg.log(`⚠️  không dựng được ảnh trang ${p} (thiếu pdftoppm?)`);
+        }
+      }
+      if (imgs.size) this.cfg.log(`🖼️  chèn ảnh trang gốc: ${[...imgs.keys()].join(', ')}`);
+    }
     const base = docTitle(st.name) + (partial ? ' - CHUA-DU' : '');
     const errBox = (c: ChunkState) => `<div style="border:2px solid #dc2626;border-radius:8px;padding:12px;margin:16px 0;color:#991b1b">` +
       `⚠️ Trang ${c.s}–${c.e} chưa OCR được: ${(c.error || '').replace(/</g, '&lt;')}</div>`;
     if (st.mode === 'html') {
-      const content = st.chunks.map(c => c.status === 'done' ? MarkdownRenderer.renderHtmlContent(c.raw || '') : errBox(c))
+      const withImg = (raw: string) => raw.replace(/<!--PAGE_IMG:(\d+)-->/g, (_m, n) => {
+        const im = imgs.get(+n);
+        return im ? `<img src="${im.dataUrl}" alt="Trang ${n} (ảnh bản gốc)" style="display:block;max-width:100%;margin:8px auto 20px;border:1px solid #e5e7eb;border-radius:6px">` : '';
+      });
+      const content = st.chunks.map(c => c.status === 'done' ? MarkdownRenderer.renderHtmlContent(withImg(c.raw || '')) : errBox(c))
         .join('<hr class="my-10 border-slate-200" />');
       const html = generateHtmlDocument({ title: docTitle(st.name), content, profile: st.profile || undefined,
                                           subtitle: 'Trọn bộ tài liệu' } as any);
       return this.atomicWrite(this.uniquePath(this.d.output, base, '.html'), html);
     }
     const md = st.chunks.map(c => c.status === 'done' ? (c.raw || '') : `> ⚠️ Trang ${c.s}–${c.e} chưa OCR được: ${c.error}`).join('\n\n');
-    this.atomicWrite(this.uniquePath(this.d.output, base, '.md'), md);
-    const docx = await markdownToDocx(docTitle(st.name), md);
+    this.atomicWrite(this.uniquePath(this.d.output, base, '.md'),
+      md.replace(/!\[IMG-(\d+)\]/g, (_m, n) => `*(ảnh trang ${n} bản gốc: xem trong file .docx)*`));
+    const docx = await markdownToDocx(docTitle(st.name), md,
+      [...imgs].map(([p, im]) => ({ key: pageImgKey(p), ...im })));
     return this.atomicWrite(this.uniquePath(this.d.output, base, '.docx'), docx);
   }
 

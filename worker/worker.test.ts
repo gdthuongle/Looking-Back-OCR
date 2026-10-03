@@ -307,7 +307,8 @@ describe('đường ống đầy đủ', () => {
     const w = worker({ fallbackModels: ['f2', 'f3'] });
     await runUntilIdle(w);
     const html = readFileSync(join(root, 'output', 'a.html'), 'utf8');   // vẫn ra bản đầy đủ
-    expect(html).toContain('Trang 5: không OCR được');                // chỉ đúng trang 5 bị bỏ
+    expect(html).toContain('Trang 5: AI không OCR được');             // chỉ đúng trang 5 bị bỏ…
+    expect(html).toContain('alt="Trang 5 (ảnh bản gốc)"');           // …và được thay bằng ảnh trang gốc
     for (const p of [1, 4, 6, 8]) expect(html).toMatch(new RegExp(`Nội dung trang ${p}(\\.\\.\\.)?</p>`));
     expect(existsSync(join(root, 'input', 'daocr', 'a.pdf'))).toBe(true);
     expect(logs.some(l => l.includes('bỏ qua trang 5 vì AI từ chối'))).toBe(true);
@@ -335,5 +336,22 @@ describe('đường ống đầy đủ', () => {
     expect(existsSync(join(root, 'input', 'daocr', 'M-sach-y-hoc.pdf'))).toBe(true);
     expect(seen).toContain('MEDIUM');
     expect(seen).toContain('LOW');                                     // file không tiền tố dùng OCR_THINKING
+  });
+
+  test('DOCX: trang bị từ chối được chèn ẢNH trang gốc vào file .docx', async () => {
+    await makePdf(join(root, 'input', 'docx', 'b.pdf'), 6);
+    script = c => c.style ? null
+      : c.s <= 3 && c.e >= 3 ? Response.json({ candidates: [{ content: { parts: [] }, finishReason: 'RECITATION' }] })
+      : Response.json({ candidates: [{ content: { parts: [{ text: `Đoạn văn trang ${c.s}-${c.e}` }] }, finishReason: 'STOP' }] });
+    await runUntilIdle(worker({ fallbackModels: ['f2'] }));
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(readFileSync(join(root, 'output', 'b.docx')));
+    const media = Object.keys(zip.files).filter(f => f.startsWith('word/media/') && !f.endsWith('/'));
+    expect(media.length).toBe(1);                                      // đúng 1 ảnh: trang 3
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('Trang 3: AI không OCR được');
+    expect(xml).toContain('Đoạn văn trang');                            // các trang khác vẫn là chữ
+    expect(readFileSync(join(root, 'output', 'b.md'), 'utf8')).toContain('ảnh trang 3 bản gốc');
+    expect(existsSync(join(root, 'input', 'daocr', 'b.pdf'))).toBe(true);
   });
 });

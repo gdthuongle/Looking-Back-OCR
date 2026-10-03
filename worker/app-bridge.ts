@@ -49,7 +49,12 @@ export function parseProfile(rawText: string, sampleIndices: number[]): Document
   } as DocumentStyleProfile;
 }
 
-export async function markdownToDocx(title: string, markdown: string): Promise<Uint8Array> {
-  const blob: Blob = await DocxExporter.generateDocx(title, markdown, []);
+/** images: ảnh chèn vào chỗ giữ ![IMG-n] (dataUrl PNG + kích thước px), docx-exporter tự thu nhỏ vừa trang. */
+export async function markdownToDocx(title: string, markdown: string,
+                                     images: { key: string; dataUrl: string; width: number; height: number }[] = []): Promise<Uint8Array> {
+  const pages: any[] = images.length
+    ? [{ pageNum: 0, items: [], pageImageUrl: '', extractedImages: images.map(i => ({ labeledKey: i.key, dataUrl: i.dataUrl, width: i.width, height: i.height })) }]
+    : [];
+  const blob: Blob = await DocxExporter.generateDocx(title, markdown, pages);
   return new Uint8Array(await blob.arrayBuffer());
 }
