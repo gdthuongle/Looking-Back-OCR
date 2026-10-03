@@ -14,14 +14,18 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 STATE_DIR = os.path.join(os.path.dirname(__file__), '..', '.ocr-state')
 BLOCK = {'p', 'div', 'section', 'article', 'header', 'footer', 'aside', 'main', 'figure', 'figcaption', 'nav',
          'center', 'dl', 'dt', 'dd', 'address', 'details', 'summary', 'form', 'fieldset'}
-SKIP = {'style', 'script', 'head', 'title', 'meta', 'link', 'svg', 'img', 'button', 'input', 'select', 'noscript'}
+SKIP = {'style', 'script', 'head', 'title', 'svg', 'img', 'select', 'noscript'}
+# Thẻ rỗng: html.parser đôi khi LỒNG phần nội dung phía sau vào bên trong chúng -> phải đọc tiếp phần lồng bên trong
+VOID = {'br', 'hr', 'img', 'input', 'meta', 'link', 'wbr', 'col', 'area', 'source', 'embed', 'param', 'track'}
 
 
 _IMAGES = None        # khi đổi file .html: list [(tên file, bytes)] nhận ảnh data: (ảnh trang gốc) để tách ra file
@@ -58,6 +62,12 @@ def norm(s):
 
 def inline(node):
     """Nội dung inline của một nút -> chuỗi markdown một dòng (giữ <br> thành \\n)."""
+    if isinstance(node, Tag) and node.name in VOID and node.contents:
+        return inline_void(node) + ''.join(inline(c) for c in node.children)
+    return inline_void(node)
+
+
+def inline_void(node):
     if isinstance(node, Comment):
         return ''
     if isinstance(node, NavigableString):
@@ -152,9 +162,17 @@ def blocks(node, out, quote=False):
         if not isinstance(c, Tag) or (c.name in SKIP and c.name != 'img'):
             continue
         name = c.name
+        if name in VOID and c.contents and (has_block(c) or name != 'br'):   # thẻ rỗng bị lồng nội dung khối
+            buf.append(inline_void(c) if name in ('br', 'img') else '')
+            flush()
+            blocks(c, out, quote)
+            continue
         if name == 'page-mark':
             flush()
             out.append(f'[Trang {c["n"]}]')
+        elif name == 'page-img':
+            flush()
+            out.append(f'{{{{IMG:{c["n"]}}}}}')
         elif re.fullmatch(r'h[1-6]', name):
             flush()
             t = norm(inline(c).replace('\n', ' ')).strip()
@@ -193,6 +211,7 @@ def blocks(node, out, quote=False):
 
 def chunk_to_md(raw):
     raw = re.sub(r'<!--\s*PAGE_BREAK:\s*(\d+)\s*-->', r'<page-mark n="\1"></page-mark>', raw)
+    raw = re.sub(r'<!--\s*PAGE_IMG:(\d+)\s*-->', r'<page-img n="\1"></page-img>', raw)
     soup = BeautifulSoup(raw, 'html.parser')
     out = []
     blocks(soup, out)
@@ -220,6 +239,60 @@ def html_file_to_md(html, title, img_prefix):
     parts = [f'# {title}', f'> Nguồn: chuyển từ `{title}.html` (kết quả OCR). Có thể sai sót — đối chiếu bản gốc trước khi '
              'dùng làm đáp án. `[Trang N]` = số trang trong file PDF gốc.'] + out
     md = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts)).strip() + '\n'
+    return md, images
+
+
+def latex_to_md(md):
+    """Công thức LaTeX của prompt (\\( .. \\) và \\[ .. \\]) -> cú pháp Markdown chuẩn $..$ / $$..$$."""
+    md = re.sub(r'\\\[(.+?)\\\]', lambda m: '$$' + m.group(1).strip() + '$$', md, flags=re.S)
+    return re.sub(r'\\\((.+?)\\\)', lambda m: '$' + m.group(1).strip() + '$', md, flags=re.S)
+
+
+def render_page_png(pdf_path, page, dpi=110):
+    """Ảnh 1 trang PDF (pdftoppm). Lỗi/thiếu công cụ -> None."""
+    if not pdf_path or not os.path.exists(pdf_path):
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        r = subprocess.run(['pdftoppm', '-f', str(page), '-l', str(page), '-r', str(dpi), '-png', '-singlefile',
+                            pdf_path, os.path.join(d, 'p')], capture_output=True)
+        f = os.path.join(d, 'p.png')
+        return open(f, 'rb').read() if r.returncode == 0 and os.path.exists(f) else None
+
+
+def state_to_md(st, img_prefix, pdf_path=None):
+    """Bản thô đã lưu (.ocr-state) -> (markdown, [(tên ảnh, bytes)]). Công thức giữ dạng LaTeX $..$.
+    Trang AI từ chối: chèn ảnh trang gốc dựng từ PDF (nếu có pdf_path)."""
+    title = re.sub(r'^[LMH][-_ ]', '', re.sub(r'\.[^.]+$', '', st['name']), flags=re.I)
+    parts = [f'# {title}',
+             f'> Nguồn: OCR tự động từ `{st["name"]}` ({st["pages"]} trang) bằng Looking-Back-OCR (Gemini). '
+             'Có thể sai sót, nhất là số liệu trong bảng/hình — đối chiếu PDF trước khi dùng làm đáp án. '
+             + ('`[Trang N]` = số trang trong file PDF. ' if st.get('mode') == 'html' else '')
+             + 'Công thức viết dạng LaTeX `$...$`.']
+    skipped = sorted({p for x in st.get('skipped') or [] for p in range(x['s'], x['e'] + 1)})
+    for c in st['chunks']:
+        if c.get('status') != 'done' or not c.get('raw'):
+            parts.append(f'> ⚠️ Trang {c["s"]}–{c["e"]}: chưa OCR được.')
+        elif st.get('mode') == 'html':
+            parts += chunk_to_md(c['raw'])
+        else:                                                   # kiểu DOCX: bản thô đã là Markdown
+            parts.append(re.sub(r'!\[IMG-(\d+)\]', r'{{IMG:\1}}', c['raw'].strip()))
+    for p in skipped:                                           # bản cũ chưa có chỗ chèn ảnh: chèn sau ghi chú của trang
+        if f'{{{{IMG:{p}}}}}' not in parts and f'[Trang {p}]' in parts:
+            i = parts.index(f'[Trang {p}]')
+            parts.insert(i + 2 if i + 1 < len(parts) and 'không OCR được' in parts[i + 1] else i + 1, f'{{{{IMG:{p}}}}}')
+    md = '\n\n'.join(parts)
+    images = []
+
+    def img(m):
+        p = int(m.group(1))
+        data = render_page_png(pdf_path, p)
+        if not data:
+            return f'*(trang {p}: xem trong PDF gốc)*'
+        name = f'{img_prefix}-trang-{p}.png'
+        images.append((name, data))
+        return f'![Trang {p} (ảnh bản gốc)]({name})'
+    md = re.sub(r'\{\{IMG:(\d+)\}\}', img, md)
+    md = latex_to_md(re.sub(r'\n{3,}', '\n\n', md)).strip() + '\n'
     return md, images
 
 
