@@ -12,7 +12,9 @@
     [isModelLocked]="isOutputModeLocked()"
     [hasDocument]="pdfPages().length > 0"
     (modelChange)="selectedModel.set($event)"
+    [autoAvailable]="autoOcrAvailable()"
     (openHistory)="showHistoryModal.set(true)"
+    (openAuto)="showAutoModal.set(true)"
     (openApiKey)="openApiKeyModal()"
     (navigateHome)="onHeaderHomeClick()">
   </app-header>
@@ -157,6 +159,10 @@
       (exportItem)="exportProjectItem($event)"
       (importItem)="importProjectFile($event)">
     </app-history-modal>
+  }
+
+  @if (showAutoModal()) {
+    <app-auto-ocr-modal (closeModal)="showAutoModal.set(false)"></app-auto-ocr-modal>
   }
 
 </div>

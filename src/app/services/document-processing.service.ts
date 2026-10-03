@@ -6,6 +6,18 @@ import { ModelType, OutputMode, DocumentStyleProfile, DEFAULT_STYLE_PROFILE } fr
 import { translateGeminiError } from '../utils/gemini-error.util';
 import { HistoryService, generateHistoryId } from './history.service';
 
+export const CHUNK_PAGE_OPTIONS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20];
+const CHUNK_PAGES_KEY = 'lbo_chunk_pages';
+
+function readChunkPages(): number {
+  try {
+    const v = parseInt(localStorage.getItem(CHUNK_PAGES_KEY) || '', 10);
+    return CHUNK_PAGE_OPTIONS.includes(v) ? v : 12;
+  } catch {
+    return 12;
+  }
+}
+
 export interface PdfChunk {
   id: string;
   originalFileName?: string;
@@ -47,6 +59,8 @@ export class DocumentProcessingService {
   clientApiKey = signal('');
   metaApiKey = signal('');
   metaModelName = signal('muse-spark-1.3-contributor');
+  /** Số trang tối đa mỗi phần (khối gửi AI). Nhỏ hơn = mỗi lần gửi nhẹ hơn, ít bị 503/cắt cụt, nhưng tốn nhiều lượt gọi hơn. */
+  chunkPages = signal<number>(readChunkPages());
 
   // Execution State
   isParsing = signal(false);
@@ -262,10 +276,36 @@ export class DocumentProcessingService {
     }
   }
 
+  /** Đổi số trang mỗi phần. Nếu tài liệu hiện tại chưa bắt đầu xử lý thì chia lại ngay. */
+  async setChunkPages(n: number): Promise<void> {
+    if (!CHUNK_PAGE_OPTIONS.includes(n) || n === this.chunkPages()) return;
+    this.chunkPages.set(n);
+    try { localStorage.setItem(CHUNK_PAGES_KEY, String(n)); } catch { /* bỏ qua */ }
+    const file = this.pdfFile();
+    if (!file || this.isMultiFileMode() || this.isOutputModeLocked() || this.isParsing()) return;
+    this.isParsing.set(true);
+    try {
+      const { pages, chunks } = await this.pdfProcessor.extractPdfChunks(file, (msg: string) => this.parsingStatus.set(msg), n);
+      this.pdfPages.set(pages);
+      this.pdfChunks.set(chunks);
+      this.selectedChunkIndex.set(0);
+      this.documentStyleProfile.set(null);           // mẫu thiết kế lấy theo phần -> phân tích lại
+      await this.saveCurrentProgressToHistory();
+      this.startBackgroundPagesRendering();
+      this.showSuccess(`Đã chia lại: ${chunks.length} phần, tối đa ${n} trang mỗi phần.`);
+    } catch (err: any) {
+      this.apiError.set('Không chia lại được tài liệu: ' + (err.message || err) + '.');
+    } finally {
+      this.isParsing.set(false);
+      this.parsingStatus.set('');
+    }
+  }
+
   async processPdfFile(file: File): Promise<boolean> {
     if (file.size > 100 * 1024 * 1024) {
-      this.apiError.set(`Tài liệu vượt quá giới hạn 100MB (${this.pdfProcessor.formatBytes(file.size)}). Vui lòng chọn tệp nhỏ hơn.`);
-      return false;
+      // Không chặn nữa: file lớn vẫn xử lý được (chia nhỏ, chạy lần lượt), chỉ cảnh báo vì trình duyệt phải giữ cả file trong bộ nhớ.
+      this.showWarning(`Tài liệu lớn (${this.pdfProcessor.formatBytes(file.size)}): trình duyệt có thể chậm và tốn RAM. ` +
+        'Với file rất lớn nên dùng "Xử lý tự động" trên máy chủ (chép file vào thư mục input).');
     }
 
     this.isMultiFileMode.set(false);
@@ -299,7 +339,8 @@ export class DocumentProcessingService {
     try {
       const { pages, chunks } = await this.pdfProcessor.extractPdfChunks(
         file,
-        (msg: string) => this.parsingStatus.set(msg)
+        (msg: string) => this.parsingStatus.set(msg),
+        this.chunkPages()
       );
 
       this.pdfPages.set(pages);

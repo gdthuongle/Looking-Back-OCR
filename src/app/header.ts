@@ -187,6 +187,17 @@ export const DEFAULT_STYLE_PROFILE: DocumentStyleProfile = {
       <!-- Right side: Actions & API Key Badge -->
       <div class="flex items-center justify-center lg:justify-end lg:justify-self-end gap-2 text-xs shrink-0 w-full lg:w-auto">
         @if (isScriptLoaded()) {
+          @if (autoAvailable()) {
+            <!-- Xử lý tự động trên máy chủ -->
+            <button
+              type="button"
+              (click)="openAuto.emit()"
+              title="Xem tiến trình xử lý tự động trên máy chủ"
+              class="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/20 rounded-full font-medium transition-colors cursor-pointer focus:outline-none">
+              <mat-icon class="!text-[15px] !w-[15px] !h-[15px] leading-none flex items-center justify-center -mt-[1px]">auto_mode</mat-icon>
+              <span>Tự động</span>
+            </button>
+          }
           <!-- History Button -->
           <button 
             type="button"
@@ -231,9 +242,11 @@ export class Header {
   isBatchProcessing = input<boolean>(false);
   isModelLocked = input<boolean>(false);
   hasDocument = input<boolean>(false);
+  autoAvailable = input<boolean>(false);
 
   modelChange = output<ModelType>();
   openHistory = output<void>();
+  openAuto = output<void>();
   openApiKey = output<void>();
   navigateHome = output<void>();
 

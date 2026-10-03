@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, output, inject, signal, effect, ElementRef, viewChild, PLATFORM_ID } from '@angular/core';
 import { CommonModule, isPlatformBrowser } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
-import { DocumentProcessingService } from './services/document-processing.service';
+import { DocumentProcessingService, CHUNK_PAGE_OPTIONS } from './services/document-processing.service';
 import { OutputMode } from './header';
 
 @Component({
@@ -202,6 +202,29 @@ import { OutputMode } from './header';
           </div>
         </div>
 
+        <!-- Số trang mỗi phần -->
+        @if (!docService.isMultiFileMode()) {
+          <div class="flex items-center justify-between gap-2 text-[11px] text-slate-400 font-sans px-0.5 mb-1"
+               title="Phần nhỏ: mỗi lần gửi AI nhẹ hơn, ít bị lỗi 503 / cắt cụt, nhưng tốn nhiều lượt gọi hơn (key miễn phí giới hạn lượt/ngày). Chỉ đổi được trước khi bắt đầu xử lý.">
+            <label for="chunk-pages-select" class="flex items-center gap-1">
+              <mat-icon class="!text-[14px] !w-3.5 !h-3.5 leading-none">splitscreen</mat-icon>
+              Số trang mỗi phần
+            </label>
+            <div class="flex items-center gap-1.5">
+              <select id="chunk-pages-select"
+                class="bg-slate-900 border border-white/10 rounded-md px-1.5 py-0.5 text-slate-200 text-[11px] focus:outline-none focus:border-indigo-500 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+                [value]="docService.chunkPages()"
+                [disabled]="isOptimizing() || isParsing() || isOutputModeLocked()"
+                (change)="onChunkPagesChange($event)">
+                @for (n of chunkPageOptions; track n) {
+                  <option [value]="n" [selected]="n === docService.chunkPages()">{{ n }}</option>
+                }
+              </select>
+              <span class="text-slate-500">→ {{ pdfChunks().length }} phần</span>
+            </div>
+          </div>
+        }
+
         <!-- Batch Process Button -->
         <div class="flex items-center gap-2">
           @if (isBatchProcessing()) {
@@ -366,6 +389,13 @@ export class WorkspaceAside {
   selectChunk = output<number>();
   optimizeChunk = output<number>();
   outputModeChange = output<OutputMode>();
+
+  chunkPageOptions = CHUNK_PAGE_OPTIONS;
+
+  onChunkPagesChange(ev: Event) {
+    const n = parseInt((ev.target as HTMLSelectElement).value, 10);
+    void this.docService.setChunkPages(n);
+  }
 
   onOutputModeSelect(mode: OutputMode) {
     if (this.isOptimizing() || this.isParsing() || this.isOutputModeLocked()) return;

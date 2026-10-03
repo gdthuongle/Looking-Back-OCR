@@ -35,6 +35,7 @@ import { EmptyState } from './empty-state';
 import { InstructionModal } from './instruction-modal';
 import { ApiKeyModal } from './api-key-modal';
 import { HistoryModal } from './history-modal';
+import { AutoOcrModal, isAutoOcrAvailable } from './auto-ocr-modal';
 import { WorkspaceAside } from './workspace-aside';
 import { WorkspacePreview } from './workspace-preview';
 import { FullscreenComparison } from './fullscreen-comparison';
@@ -54,6 +55,7 @@ export type { PdfChunk };
     InstructionModal,
     ApiKeyModal,
     HistoryModal,
+    AutoOcrModal,
     WorkspaceAside,
     WorkspacePreview,
     FullscreenComparison,
@@ -107,6 +109,8 @@ export class App {
   isDevMode = signal(false);
   showApiKeyModal = signal(false);
   showHistoryModal = signal(false);
+  showAutoModal = signal(false);
+  autoOcrAvailable = signal(false);
   showInstruction = signal(false);
   showFullscreenComparison = signal(false);
   zoomImageUrl = signal<string | null>(null);
@@ -127,6 +131,11 @@ export class App {
   private errorTimeout: any = null;
 
   constructor() {
+    // Có worker xử lý tự động trên máy chủ không (bản AI Studio/Cloudflare thì không) -> hiện nút "Tự động"
+    if (typeof window !== 'undefined') {
+      void isAutoOcrAvailable().then(v => this.autoOcrAvailable.set(v));
+    }
+
     // Auto-dismiss errors after 12s
     effect(() => {
       const err = this.apiError();

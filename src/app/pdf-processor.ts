@@ -178,7 +178,7 @@ export class PdfProcessor {
     return '';
   }
 
-  async extractPdfChunks(file: File, onProgress: (msg: string) => void): Promise<{ pages: PdfPageData[], chunks: any[] }> {
+  async extractPdfChunks(file: File, onProgress: (msg: string) => void, maxPagesPerChunk = 12): Promise<{ pages: PdfPageData[], chunks: any[] }> {
     this.pageToDocMap.clear();
     this.loadedPdfDocs.clear();
 
@@ -187,9 +187,7 @@ export class PdfProcessor {
     const srcDoc = await PDFDocument.load(arrayBuffer);
     const numPages = srcDoc.getPageCount();
 
-    if (numPages > 500) {
-      throw new Error(`Tài liệu có ${numPages} trang, vượt quá giới hạn cho phép (tối đa 500 trang). Vui lòng chia nhỏ tài liệu trước khi xử lý.`);
-    }
+    // Không giới hạn số trang: tài liệu lớn được chia thành nhiều phần nhỏ và xử lý lần lượt.
 
     // Initialize pdfjs document for on-demand PNG rendering
     try {
@@ -217,7 +215,7 @@ export class PdfProcessor {
     const createChunks = (pages: PdfPageData[]): any[] => {
       const chunks: any[] = [];
       const divide = (p: PdfPageData[]) => {
-        if (p.length <= 12) {
+        if (p.length <= Math.max(1, maxPagesPerChunk)) {
           if (p.length > 0) {
             chunks.push({
               id: '',
