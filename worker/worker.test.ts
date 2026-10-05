@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { Cfg } from './pipeline';
 import { classifyHttp, parseRetryDelay } from './gemini';
-import { dirsFor, Worker } from './main';
+import { cfgFromEnv, dirsFor, reloadCfg, Worker } from './main';
 import { makeChunks, validateOutput } from './pipeline';
 
 type Reply = (c: { model: string; key: string; s: number; e: number; n: number; style: boolean }) => Response | null | Promise<Response>;
@@ -362,5 +362,29 @@ describe('đường ống đầy đủ', () => {
     expect(fixPageMarks('<!-- PAGE_BREAK: 1 -->x', 5, 6)).toBe('<!-- PAGE_BREAK: 1 -->x');   // thiếu dấu -> giữ nguyên
     expect(fixPageMarks('<!-- PAGE_BREAK: 1 -->trang một dài<!-- PAGE_BREAK: 16 -->146<!-- PAGE_BREAK: 2 -->trang hai dài', 5, 6))
       .toBe('<!-- PAGE_BREAK: 5 -->trang một dài146<!-- PAGE_BREAK: 6 -->trang hai dài');               // dấu thừa ít chữ bị bỏ
+  });
+});
+
+describe('nạp lại ocr.env khi đang chạy', () => {
+  test('mọi cài đặt được áp ngay; số sai thì giữ giá trị cũ', () => {
+    const keep = { ...process.env };
+    try {
+      Object.assign(process.env, { GEMINI_API_KEYS: 'K1', OCR_MODEL: 'm-a', OCR_FALLBACK_MODELS: 'm-b', OCR_CONCURRENCY: '2', OCR_THINKING: 'LOW' });
+      const logs: string[] = [];
+      const cfg = cfgFromEnv(m => logs.push(m));
+      const w = new Worker(cfg, dirsFor(mkdtempSync(join(tmpdir(), 'ocr-reload-'))));
+      expect(w.pool.models).toEqual(['m-a', 'm-b']);
+      Object.assign(process.env, { GEMINI_API_KEYS: 'K1,K2', OCR_MODEL: 'm-c', OCR_FALLBACK_MODELS: 'm-a,m-b', OCR_CONCURRENCY: 'abc', OCR_CHUNK_PAGES: '6', OCR_THINKING: 'high' });
+      expect(reloadCfg(cfg, w.pool, m => logs.push(m))).toBe(1);
+      expect(w.cfg.keys).toEqual(['K1', 'K2']);
+      expect(w.pool.models).toEqual(['m-c', 'm-a', 'm-b']);
+      expect(w.cfg.chunkPages).toBe(6);
+      expect(w.cfg.thinking).toBe('HIGH');
+      expect(w.cfg.concurrency).toBe(2);                     // 'abc' -> giữ cũ
+      expect(logs.some(l => l.includes('concurrency'))).toBe(true);
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in keep)) delete process.env[k];
+      Object.assign(process.env, keep);
+    }
   });
 });

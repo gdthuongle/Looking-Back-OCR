@@ -417,6 +417,18 @@ export function cfgFromEnv(log: (m: string) => void): Cfg {
   };
 }
 
+/** Áp cấu hình mới (từ process.env) vào cfg đang dùng chung với worker/pool. Trả số key mới. Giá trị số sai thì giữ giá trị cũ.
+ *  Số trang mỗi khối chỉ áp cho file bắt đầu sau đó (file đang làm giữ cách chia cũ). */
+export function reloadCfg(cfg: Cfg, pool: KeyPool, log: (m: string) => void): number {
+  const fresh = cfgFromEnv(log);
+  for (const k of Object.keys(fresh) as (keyof Cfg)[]) {
+    const v = fresh[k];
+    if (typeof v === 'number' && !(Number.isFinite(v) && v > 0)) { log(`⚠️ ocr.env: ${k} không hợp lệ, giữ ${cfg[k]}`); continue; }
+    (cfg as any)[k] = v;
+  }
+  return pool.setKeys(cfg.keys);
+}
+
 if (import.meta.main) {
   loadEnvFile(process.env.OCR_ENV || '/opt/pdfocr-deploy/ocr.env');
   const root = process.env.OCR_ROOT || join(import.meta.dir, '..');
@@ -436,16 +448,16 @@ if (import.meta.main) {
   let envSig = '';
   const envMtime = () => { try { return String(statSync(envPath).mtimeMs); } catch { return ''; } };
   envSig = envMtime();
-  /** Theo dõi ocr.env mỗi 30 giây, kể cả khi đang OCR: đổi key thì nạp ngay, không cần restart, không mất tiến độ. */
+  /** Theo dõi ocr.env mỗi 30 giây, kể cả khi đang OCR: nạp lại MỌI cài đặt (key, model, số khối…), không cần restart,
+   *  không mất tiến độ. File vừa sửa dưới 2 giây thì đợi lượt sau (tránh đọc lúc đang ghi dở). */
   setInterval(() => {
     const sig = envMtime();
-    if (!sig || sig === envSig) return;
+    if (!sig || sig === envSig || Date.now() - Number(sig) < 2000) return;
     envSig = sig;
     loadEnvFile(envPath, true);
-    const keys = (process.env.GEMINI_API_KEYS || '').split(/[,\s]+/).filter(Boolean);
-    const added = w.pool.setKeys(keys);
-    cfg.keys = keys;
-    log(`🔑 nạp lại ocr.env: ${keys.length} key${added ? ` (${added} key mới -> thử lại các model đang bị chặn)` : ''}`);
+    const added = reloadCfg(cfg, w.pool, log);
+    log(`🔑 nạp lại ocr.env: ${cfg.keys.length} key${added ? ` (${added} key mới -> thử lại các model đang bị chặn)` : ''}, ` +
+        `model ${[cfg.model, ...cfg.fallbackModels].join(' → ')}, ${cfg.concurrency} khối song song, ${cfg.chunkPages} trang/khối, suy nghĩ ${cfg.thinking}`);
   }, 30_000);
   for (;;) {
     if (stop) break;
