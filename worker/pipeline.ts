@@ -13,6 +13,7 @@ export interface Cfg {
   fallbackModels: string[];   // model dự phòng, thử lần lượt ([] = không dùng)
   concurrency: number;        // số khối chạy song song (ứng dụng web dùng 2)
   chunkPages: number;         // tối đa trang mỗi khối (ứng dụng web: 12)
+  splitPages?: number;        // PDF dài hơn mức này: cắt từng đoạn bằng poppler, không nạp cả file vào RAM (mặc định 120)
   minChunkPages?: number;     // không tự chia nhỏ hơn mức này khi gặp 503 (mặc định 3)
   maxTries: number;           // số lần thử khi lỗi tạm thời, cho MỖI model
   backoffBaseMs: number;
@@ -130,12 +131,17 @@ export class KeyPool {
 export const pageImgKey = (p: number) => `IMG-${p}`;                 // dạng chỗ giữ ảnh mà docx-exporter hiểu: ![IMG-12]
 export const pageImgComment = (p: number) => `<!--PAGE_IMG:${p}-->`;
 
-/** Dựng 1 trang PDF thành PNG bằng pdftoppm. Không có pdftoppm/lỗi -> null (chỉ còn ghi chú, không có ảnh). */
-export async function renderPagePng(src: PDFDocument, p: number, dpi = 110): Promise<{ dataUrl: string; width: number; height: number } | null> {
+/** Dựng 1 trang PDF thành PNG bằng pdftoppm. src là đường dẫn file PDF -> đọc thẳng trang p (file lớn không cần nạp vào RAM).
+ *  Không có pdftoppm/lỗi -> null (chỉ còn ghi chú, không có ảnh). */
+export async function renderPagePng(src: PDFDocument | string, p: number, dpi = 110): Promise<{ dataUrl: string; width: number; height: number } | null> {
   const dir = mkdtempSync(join(tmpdir(), 'ocr-pg-'));
   try {
-    writeFileSync(join(dir, 'p.pdf'), Buffer.from(await slicePdf(src, p, p), 'base64'));
-    const r = Bun.spawnSync(['pdftoppm', '-r', String(dpi), '-png', '-singlefile', join(dir, 'p.pdf'), join(dir, 'out')]);
+    let pdf = src as string, pg = p;
+    if (typeof src !== 'string') {
+      pdf = join(dir, 'p.pdf'); pg = 1;
+      writeFileSync(pdf, Buffer.from(await slicePdf(src, p, p), 'base64'));
+    }
+    const r = Bun.spawnSync(['pdftoppm', '-r', String(dpi), '-png', '-singlefile', '-f', String(pg), '-l', String(pg), pdf, join(dir, 'out')]);
     if (r.exitCode !== 0) return null;
     const png = readFileSync(join(dir, 'out.png'));
     return { dataUrl: `data:image/png;base64,${png.toString('base64')}`, width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
@@ -146,18 +152,68 @@ export async function renderPagePng(src: PDFDocument, p: number, dpi = 110): Pro
   }
 }
 
-/* ------------------------------------------------------------------ chia khối (giống pdf-processor.ts) */
-export function makeChunks(numPages: number, maxPages = 12): { s: number; e: number }[] {
+/* ------------------------------------------------------------------ file lớn: cắt đoạn bằng poppler */
+/** Số trang PDF qua pdfinfo (không nạp file vào RAM). Không đọc được -> null. */
+export function pdfPageCount(path: string): number | null {
+  try {
+    const r = Bun.spawnSync(['pdfinfo', path]);
+    const m = r.exitCode === 0 ? r.stdout.toString().match(/^Pages:\s+(\d+)/m) : null;
+    return m ? +m[1] : null;
+  } catch { return null; }
+}
+
+/** Ghép các dải trang của file PDF thành 1 PDF mới bằng qpdf (giữ tài nguyên dùng chung, tốn ít RAM dù file gốc rất lớn). */
+export function extractPdfPages(path: string, ranges: { s: number; e: number }[]): Uint8Array {
+  const dir = mkdtempSync(join(tmpdir(), 'ocr-cut-'));
+  try {
+    const out = join(dir, 'out.pdf');
+    const r = Bun.spawnSync(['qpdf', '--empty', '--warning-exit-0', '--pages', path, ranges.map(x => `${x.s}-${x.e}`).join(','), '--', out]);
+    if (r.exitCode !== 0) throw new Error(`qpdf cắt trang ${ranges.map(x => `${x.s}-${x.e}`).join(',')}: ${r.stderr.toString().trim().slice(0, 200)}`);
+    return readFileSync(out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Gom các khối liền nhau thành đoạn không quá maxPages trang (khối không bị cắt ngang). */
+export function groupChunks<T extends { s: number; e: number }>(chunks: T[], maxPages: number): { first: number; chunks: T[] }[] {
+  const out: { first: number; chunks: T[] }[] = [];
+  chunks.forEach((c, i) => {
+    const g = out[out.length - 1];
+    if (g && c.e - g.chunks[0].s + 1 <= maxPages) g.chunks.push(c);
+    else out.push({ first: i, chunks: [c] });
+  });
+  return out;
+}
+
+/** Chỉ số các khối mẫu dùng để phân tích thiết kế (như ứng dụng). */
+export function profileSampleIdx(n: number): number[] {
+  return n <= 3 ? Array.from({ length: n }, (_, i) => i) : n === 4 ? [0, 1, 2] : [0, Math.floor(n / 2), Math.floor(n / 2) + 1];
+}
+
+/* ------------------------------------------------------------------ chia khối */
+/** Chia đều từng khối maxPages trang (khối cuối lấy phần còn lại). Bản web chia đôi liên tục nên khối lệch nhau 12/6/7 trang:
+ *  sách 802 trang thành 98 khối thay vì 67, tốn thêm lượt gọi. */
+export function makeChunks(numPages: number, maxPages = 12, start = 1): { s: number; e: number }[] {
   const out: { s: number; e: number }[] = [];
-  const divide = (s: number, e: number) => {
-    const n = e - s + 1;
-    if (n <= 0) return;
-    if (n <= maxPages) { out.push({ s, e }); return; }
-    const mid = Math.floor(n / 2);
-    divide(s, s + mid - 1);
-    divide(s + mid, e);
+  for (let s = start; s <= numPages; s += maxPages) out.push({ s, e: Math.min(numPages, s + maxPages - 1) });
+  return out;
+}
+
+/** Giữ nguyên các khối đã xong; các dải trang chưa xong liền nhau được chia lại thành khối maxPages trang
+ *  (tiến độ cũ chia kiểu khác, hoặc vừa đổi OCR_CHUNK_PAGES). */
+export function rechunk(chunks: ChunkState[], maxPages: number): ChunkState[] {
+  const out: ChunkState[] = [];
+  let gap: { s: number; e: number } | null = null;
+  const flush = () => {
+    if (gap) for (const c of makeChunks(gap.e, maxPages, gap.s)) out.push({ ...c, status: 'pending' });
+    gap = null;
   };
-  divide(1, numPages);
+  for (const c of chunks) {
+    if (c.status === 'done') { flush(); out.push({ ...c, running: false }); continue; }
+    gap = gap ? { s: gap.s, e: c.e } : { s: c.s, e: c.e };
+  }
+  flush();
   return out;
 }
 
@@ -203,6 +259,7 @@ export function validateOutput(text: string, s: number, e: number, mode: Mode): 
 export class Ocr {
   maxPages: number;                 // cỡ khối tối đa cho file này; tự giảm khi khối lớn bị 503 lặp lại
   skipped: { s: number; e: number; why: string }[] = [];   // trang bị AI từ chối vĩnh viễn, đã bỏ qua
+  pageOffset = 0;                   // src là đoạn cắt từ file lớn: trang s của file = trang s - pageOffset của src
 
   /** Chỗ giữ cho trang AI từ chối: ghi chú + chỗ chèn ẢNH trang gốc (dựng lúc xuất file) để đủ nội dung. */
   skipMarker(s: number, e: number, why: string) {
@@ -297,7 +354,7 @@ export class Ocr {
 
     for (;;) {
       try {
-        const { parts, system } = buildPayload(await slicePdf(src, s, e), this.prompt(promptName), s, e, this.mode, profile);
+        const { parts, system } = buildPayload(await slicePdf(src, s - this.pageOffset, e - this.pageOffset), this.prompt(promptName), s, e, this.mode, profile);
         const r = await this.call(model, parts, system);
         const bad = validateOutput(r.text, s, e, this.mode);
         if (bad) throw new GeminiError('bad_output', bad);
@@ -354,8 +411,7 @@ export class Ocr {
 
   /** Phân tích hồ sơ thiết kế từ 3 khối mẫu như ứng dụng; lỗi -> mặc định (có ghi log, không âm thầm). */
   async styleProfile(src: PDFDocument, chunks: { s: number; e: number }[]): Promise<DocumentStyleProfile> {
-    const n = chunks.length;
-    const idx = n <= 3 ? chunks.map((_, i) => i) : n === 4 ? [0, 1, 2] : [0, Math.floor(n / 2), Math.floor(n / 2) + 1];
+    const idx = profileSampleIdx(chunks.length);
     let use = idx, model = await this.pool.pickWait();
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
@@ -382,16 +438,17 @@ export class Ocr {
   }
 }
 
-/** Chạy các khối còn dang dở với số luồng giới hạn; gọi onDone sau MỖI khối để lưu tiến độ. */
+/** Chạy các khối còn dang dở với số luồng giới hạn; gọi onDone sau MỖI khối để lưu tiến độ.
+ *  first/total: vị trí của các khối này trong cả file (chỉ để ghi nhật ký "Phần i/N" khi chạy theo đoạn). */
 export async function runChunks(ocr: Ocr, src: PDFDocument, chunks: ChunkState[], profile: DocumentStyleProfile | null,
-                                onDone: () => void): Promise<void> {
+                                onDone: () => void, first = 0, total = chunks.length): Promise<void> {
   const todo = chunks.map((c, i) => i).filter(i => chunks[i].status !== 'done');
   let cursor = 0, aborted = false;
   const workers = Array.from({ length: Math.min(ocr.cfg.concurrency, todo.length) }, async () => {
     while (cursor < todo.length && !aborted) {
       const i = todo[cursor++];
       const c = chunks[i];
-      const label = `Phần ${i + 1}/${chunks.length}`;
+      const label = `Phần ${first + i + 1}/${total}`;
       const t0 = Date.now();
       c.running = true; c.note = undefined;
       onDone();

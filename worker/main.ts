@@ -7,7 +7,8 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
-import { Cfg, ChunkState, KeyPool, makeChunks, Ocr, pageImgComment, pageImgKey, renderPagePng, runChunks } from './pipeline';
+import { Cfg, ChunkState, extractPdfPages, groupChunks, KeyPool, makeChunks, Ocr, pageImgComment, pageImgKey, pdfPageCount,
+         profileSampleIdx, rechunk, renderPagePng, runChunks } from './pipeline';
 import { GeminiError, ErrKind } from './gemini';
 import { DocumentStyleProfile, generateHtmlDocument, markdownToDocx, MarkdownRenderer, Mode } from './app-bridge';
 
@@ -228,26 +229,38 @@ ${cur ? `<section>${cur}</section>` : ''}
     const size = statSync(path).size;
     const log = this.cfg.log;
     let st = this.loadState(name, size);
-    let src: PDFDocument;
+    // PDF dài: không nạp cả file (pdf-lib cần ~3MB RAM/trang, sách 800 trang làm container hết RAM) mà cắt từng đoạn
+    // splitPages trang bằng poppler, OCR xong đoạn này mới cắt đoạn sau; kết quả mọi đoạn ghép lại thành 1 file như thường.
+    const splitPages = this.cfg.splitPages || 120;
+    let src: PDFDocument | null = null, pages: number;
     try {
-      src = await this.loadPdf(path);
+      const n = extname(path).toLowerCase() === '.pdf' ? pdfPageCount(path) : null;
+      if (n && n > splitPages) pages = n;
+      else { src = await this.loadPdf(path); pages = src.getPageCount(); }
     } catch (e: any) {
       log(`❌ ${name}: không đọc được file (${e?.message || e})`);
       this.finish(path, 'failed', `Không đọc được file: ${e?.message || e}`, null);
       return 'failed';
     }
-    const pages = src.getPageCount();
+    const cut = async (ranges: { s: number; e: number }[]) => PDFDocument.load(extractPdfPages(path, ranges), { ignoreEncryption: true });
     if (!st || st.mode !== mode || st.pages !== pages) {
       st = { name, size, mode, pages, chunks: makeChunks(pages, this.cfg.chunkPages).map(c => ({ ...c, status: 'pending' })),
              fails: st?.fails || 0, created: Date.now() };
     } else {
       st.chunks.forEach(c => { if (c.status === 'error') c.status = 'pending'; });
+      const re = rechunk(st.chunks, this.cfg.chunkPages);
+      if (re.length !== st.chunks.length || re.some((c, i) => c.s !== st!.chunks[i].s || c.e !== st!.chunks[i].e)) {
+        log(`✂️  ${name}: chia lại phần chưa làm thành khối ${this.cfg.chunkPages} trang (${st.chunks.length} -> ${re.length} phần)`);
+        st.chunks = re;
+      }
       const done = st.chunks.filter(c => c.status === 'done').length;
       if (done) log(`↪️  ${name}: làm tiếp, đã xong ${done}/${st.chunks.length} phần từ lần trước`);
     }
     const thinking = levelFromName(name) || this.cfg.thinking || 'HIGH';
+    const groups = src ? [] : groupChunks(st.chunks, splitPages);
     log(`▶️  ${name}: ${pages} trang, ${st.chunks.length} phần, kiểu ${mode === 'html' ? 'Bảo toàn (HTML)' : 'DOCX'}, ` +
-        `suy nghĩ ${thinking}${levelFromName(name) ? ' (theo tiền tố tên file)' : ''}`);
+        `suy nghĩ ${thinking}${levelFromName(name) ? ' (theo tiền tố tên file)' : ''}` +
+        (src ? '' : `, cắt thành ${groups.length} đoạn ≤${splitPages} trang`));
     this.saveState(st);
 
     const ocr = new Ocr({ ...this.cfg, thinking }, this.pool, mode);
@@ -256,11 +269,27 @@ ${cur ? `<section>${cur}</section>` : ''}
     progress();
     try {
       if (mode === 'html' && !st.profile) {
-        st.profile = await ocr.styleProfile(src, st.chunks);
+        if (src) st.profile = await ocr.styleProfile(src, st.chunks);
+        else {                                                 // file lớn: chỉ cắt các khối mẫu ra 1 PDF nhỏ để phân tích
+          const sample = profileSampleIdx(st.chunks.length).map(i => st!.chunks[i]);
+          let p = 1;
+          const local = sample.map(c => ({ s: p, e: (p += c.e - c.s + 1) - 1 }));
+          st.profile = await ocr.styleProfile(await cut(sample), local);
+        }
         this.saveState(st);
       }
       ocr.skipped = st.skipped || [];
-      await runChunks(ocr, src, st.chunks, st.profile || null, () => { st!.skipped = ocr.skipped; this.saveState(st!); progress(); });
+      const onDone = () => { st!.skipped = ocr.skipped; this.saveState(st!); progress(); };
+      if (src) await runChunks(ocr, src, st.chunks, st.profile || null, onDone);
+      else {
+        for (const [k, g] of groups.entries()) {
+          if (g.chunks.every(c => c.status === 'done')) continue;
+          const a = g.chunks[0].s, b = g.chunks[g.chunks.length - 1].e;
+          log(`📑 ${name}: đoạn ${k + 1}/${groups.length} (trang ${a}-${b})`);
+          ocr.pageOffset = a - 1;
+          await runChunks(ocr, await cut([{ s: a, e: b }]), g.chunks, st.profile || null, onDone, g.first, st.chunks.length);
+        }
+      }
     } catch (e: any) {
       const kind: ErrKind = e instanceof GeminiError ? e.kind : 'fatal';
       this.current = null;
@@ -279,7 +308,7 @@ ${cur ? `<section>${cur}</section>` : ''}
 
     this.current = null;
     const failed = st.chunks.filter(c => c.status !== 'done');
-    const outPath = await this.writeOutput(st, failed.length > 0, src);
+    const outPath = await this.writeOutput(st, failed.length > 0, src || path);
     if (failed.length) {
       st.fails++; st.lastFail = Date.now();
       st.lastKind = failed.every(c => c.kind && RETRYABLE.includes(c.kind)) ? 'transient' : (failed[0].kind || 'fatal');
@@ -305,7 +334,7 @@ ${cur ? `<section>${cur}</section>` : ''}
     return p;
   }
 
-  async writeOutput(st: FileState, partial: boolean, src?: PDFDocument): Promise<string> {
+  async writeOutput(st: FileState, partial: boolean, src?: PDFDocument | string): Promise<string> {
     // Ảnh trang gốc cho các trang AI từ chối (để bản xuất đủ nội dung)
     const imgs = new Map<number, { dataUrl: string; width: number; height: number }>();
     if (src) {
@@ -405,6 +434,7 @@ export function cfgFromEnv(log: (m: string) => void): Cfg {
       .split(/[,\s]+/).filter(Boolean),
     concurrency: num('OCR_CONCURRENCY', 2),
     chunkPages: num('OCR_CHUNK_PAGES', 12),
+    splitPages: num('OCR_SPLIT_PAGES', 120),
     minChunkPages: num('OCR_MIN_CHUNK_PAGES', 3),
     maxTries: num('OCR_MAX_TRIES', 6),
     backoffBaseMs: num('OCR_BACKOFF_SECONDS', 30) * 1000,

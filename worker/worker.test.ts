@@ -7,7 +7,7 @@ import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { Cfg } from './pipeline';
 import { classifyHttp, parseRetryDelay } from './gemini';
 import { cfgFromEnv, dirsFor, reloadCfg, Worker } from './main';
-import { makeChunks, validateOutput } from './pipeline';
+import { ChunkState, makeChunks, rechunk, validateOutput } from './pipeline';
 
 type Reply = (c: { model: string; key: string; s: number; e: number; n: number; style: boolean }) => Response | null | Promise<Response>;
 let script: Reply = () => null;
@@ -80,11 +80,19 @@ describe('phân loại & tiện ích', () => {
     expect(classifyHttp(400, 'INVALID_ARGUMENT', 'Request payload size exceeds the limit')).toBe('too_big');
     expect(parseRetryDelay({ details: [{ retryDelay: '37s' }] }, '')).toBe(37000);
   });
-  test('chia khối giống ứng dụng web (≤12 trang, chia đôi)', () => {
-    expect(makeChunks(154).length).toBe(16);             // khớp ảnh chụp: 154 trang -> 16 khối
-    expect(makeChunks(154)[0]).toEqual({ s: 1, e: 9 });  // "Phần 1 Trang 1-9"
-    expect(makeChunks(154)[1]).toEqual({ s: 10, e: 19 });
+  test('chia khối đều 12 trang, khối cuối lấy phần còn lại', () => {
+    expect(makeChunks(802).length).toBe(67);
+    expect(makeChunks(802)[0]).toEqual({ s: 1, e: 12 });
+    expect(makeChunks(802)[1]).toEqual({ s: 13, e: 24 });
+    expect(makeChunks(802).at(-1)).toEqual({ s: 793, e: 802 });
     expect(makeChunks(5)).toEqual([{ s: 1, e: 5 }]);
+  });
+  test('chia lại tiến độ cũ: giữ khối đã xong, chỉ chia lại dải chưa làm', () => {
+    const old: ChunkState[] = [{ s: 1, e: 6, status: 'done', raw: 'a' }, { s: 7, e: 13, status: 'pending', running: true },
+      { s: 14, e: 18, status: 'error' }, { s: 19, e: 25, status: 'pending' }, { s: 26, e: 31, status: 'done', raw: 'b' }, { s: 32, e: 40, status: 'pending' }];
+    expect(rechunk(old, 12).map(c => [c.s, c.e, c.status])).toEqual([
+      [1, 6, 'done'], [7, 18, 'pending'], [19, 25, 'pending'], [26, 31, 'done'], [32, 40, 'pending']]);
+    expect(rechunk(old, 12)[0].raw).toBe('a');
   });
   test('phát hiện kết quả hỏng', () => {
     expect(validateOutput('', 1, 2, 'html')).toContain('rỗng');
@@ -157,37 +165,37 @@ describe('đường ống đầy đủ', () => {
   });
 
   test('lỗi mãi: xuất bản chưa đủ, file vào input/loi, rồi tự thử lại và làm tiếp phần lỗi', async () => {
-    await makePdf(join(root, 'input', 'a.pdf'), 30);      // 4 khối: 1-7, 8-15, 16-22, 23-30
+    await makePdf(join(root, 'input', 'a.pdf'), 30);      // 3 khối: 1-12, 13-24, 25-30
     let broken = true;
-    script = c => broken && !c.style && c.s === 16 ? err(503, 'UNAVAILABLE', 'overloaded') : null;
+    script = c => broken && !c.style && c.s === 13 ? err(503, 'UNAVAILABLE', 'overloaded') : null;
     const w = worker();
     w.ready(); await w.tick();
     expect(existsSync(join(root, 'input', 'loi', 'a.pdf'))).toBe(true);
     expect(readFileSync(join(root, 'input', 'loi', 'a.loi.txt'), 'utf8')).toContain('TỰ thử lại');
-    expect(readFileSync(join(root, 'output', 'a - CHUA-DU.html'), 'utf8')).toContain('Trang 16–22 chưa OCR được');
-    const before = calls.filter(c => !c.style && c.s !== 16).length;
+    expect(readFileSync(join(root, 'output', 'a - CHUA-DU.html'), 'utf8')).toContain('Trang 13–24 chưa OCR được');
+    const before = calls.filter(c => !c.style && c.s !== 13).length;
 
     broken = false;                                        // Google hết quá tải
     await runUntilIdle(w);                                 // requeueFailed -> chạy lại
     expect(existsSync(join(root, 'output', 'a.html'))).toBe(true);
     expect(existsSync(join(root, 'output', 'a - CHUA-DU.html'))).toBe(false);
     expect(existsSync(join(root, 'input', 'daocr', 'a.pdf'))).toBe(true);
-    expect(calls.filter(c => !c.style && c.s !== 16).length).toBe(before);   // phần đã xong KHÔNG gọi lại
+    expect(calls.filter(c => !c.style && c.s !== 13).length).toBe(before);   // phần đã xong KHÔNG gọi lại
   });
 
   test('khởi động lại giữa chừng: làm tiếp từ tiến độ đã lưu', async () => {
-    await makePdf(join(root, 'input', 'a.pdf'), 30);      // 4 khối; worker 1 "chết" khi đang làm khối 4
+    await makePdf(join(root, 'input', 'a.pdf'), 30);      // 3 khối; worker 1 "chết" khi đang làm khối 3
     let hang = true;
-    script = c => hang && !c.style && c.s === 23 ? new Promise<Response>(() => {}) : null;
+    script = c => hang && !c.style && c.s === 25 ? new Promise<Response>(() => {}) : null;
     const w1 = worker({ concurrency: 1, timeoutMs: 600_000 });
     w1.ready();
     void w1.tick();                                        // bỏ mặc, coi như tiến trình đã chết
-    while (!calls.some(c => c.s === 23)) await Bun.sleep(10);
+    while (!calls.some(c => c.s === 25)) await Bun.sleep(10);
     hang = false;
     const w2 = worker({ concurrency: 1 });
     await runUntilIdle(w2);
     expect(existsSync(join(root, 'output', 'a.html'))).toBe(true);
-    expect(logs.some(l => l.includes('đã xong 3/4 phần'))).toBe(true);
+    expect(logs.some(l => l.includes('đã xong 2/3 phần'))).toBe(true);
     expect(calls.filter(c => c.s === 1 && !c.style).length).toBe(1);    // khối 1 không gọi lại
     expect(calls.filter(c => c.style).length).toBe(1);                  // hồ sơ thiết kế không phân tích lại
   }, 20_000);
@@ -236,7 +244,7 @@ describe('đường ống đầy đủ', () => {
   test('trang theo dõi: tiến độ từng phần, hàng đợi, file lỗi kèm giờ tự thử lại', async () => {
     await makePdf(join(root, 'input', 'a.pdf'), 30);
     await makePdf(join(root, 'input', 'b.pdf'), 2);
-    script = c => !c.style && c.s === 16 ? err(503, 'UNAVAILABLE', 'overloaded') : null;
+    script = c => !c.style && c.s === 13 ? err(503, 'UNAVAILABLE', 'overloaded') : null;
     const w = worker();
     (w.opts as any).retryFailedMs = 3600_000;
     w.ready(); await w.tick();
@@ -353,6 +361,29 @@ describe('đường ống đầy đủ', () => {
     expect(xml).toContain('Đoạn văn trang');                            // các trang khác vẫn là chữ
     expect(readFileSync(join(root, 'output', 'b.md'), 'utf8')).toContain('ảnh trang 3 bản gốc');
     expect(existsSync(join(root, 'input', 'daocr', 'b.pdf'))).toBe(true);
+  });
+
+  test.skipIf(!Bun.which('qpdf'))('file dài: cắt đoạn bằng qpdf, OCR từng đoạn rồi ghép lại 1 file, đúng số trang', async () => {
+    await makePdf(join(root, 'input', 'dai.pdf'), 40);
+    const sent: { s: number; e: number; pages: number }[] = [];
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async (u: any, init: any) => {
+      const b = JSON.parse(init.body), parts = b.contents[0].parts;
+      const m = parts.map((x: any) => x.text || '').join(' ').match(/từ trang \*\*(\d+)\*\* đến trang \*\*(\d+)\*\*/);
+      const pdf = parts.find((x: any) => x.inlineData);
+      if (m && pdf) sent.push({ s: +m[1], e: +m[2], pages: (await PDFDocument.load(Buffer.from(pdf.inlineData.data, 'base64'))).getPageCount() });
+      return orig(u, init);
+    }) as any;
+    script = c => !c.style && c.s <= 25 && c.e >= 25 ? Response.json({ candidates: [{ content: { parts: [] }, finishReason: 'RECITATION' }] }) : null;
+    try { await runUntilIdle(worker({ splitPages: 10, chunkPages: 6, fallbackModels: [] })); } finally { globalThis.fetch = orig; }
+    const html = readFileSync(join(root, 'output', 'dai.html'), 'utf8');            // 1 file kết quả cho cả 40 trang
+    for (const p of [1, 10, 11, 24, 26, 40]) expect(html).toMatch(new RegExp(`Nội dung trang ${p}(\\.\\.\\.)?</p>`));
+    expect(html.indexOf('Nội dung trang 11')).toBeGreaterThan(html.indexOf('Nội dung trang 10'));   // đúng thứ tự
+    expect(html).toContain('alt="Trang 25 (ảnh bản gốc)"');                          // ảnh dựng thẳng từ file gốc
+    expect(html).toContain('Lora');                                                   // hồ sơ thiết kế từ các khối mẫu
+    for (const x of sent) expect(x.pages).toBe(x.e - x.s + 1);                        // mỗi khối gửi đúng số trang
+    expect(logs.filter(l => l.includes('📑')).length).toBeGreaterThanOrEqual(4);
+    expect(existsSync(join(root, 'input', 'daocr', 'dai.pdf'))).toBe(true);
   });
 
   test('số trang AI ghi lệch (theo số in trên sách) được đánh lại đúng trang PDF', async () => {
