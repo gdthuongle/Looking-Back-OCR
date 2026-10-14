@@ -102,6 +102,9 @@ dạng `AIza…`. Key sai: file **vẫn nằm trong hàng đợi** (không bị 
 - **Trang AI từ chối (bản quyền, an toàn…)**: worker chia nhỏ để cô lập đúng trang đó, các trang khác vẫn OCR bình thường.
   Trang bị từ chối được **thay bằng ảnh chụp trang gốc** (cả trong .docx và .html) kèm ghi chú vàng, nên bản xuất đủ nội dung;
   file vẫn tính là xong (`input/daocr/`), nhật ký ghi rõ những trang đã thay bằng ảnh. Trong `.md` chỉ có ghi chú (ảnh nằm trong .docx).
+- **Sách dày (trên 120 trang)**: worker tự cắt từng đoạn 120 trang (qpdf) để OCR, xong ghép lại thành **1 file kết quả**
+  như bình thường — không nạp cả file vào RAM (sách 800 trang trước đây làm container hết RAM, khởi động lại liên tục).
+  Đổi số trang mỗi đoạn: `OCR_SPLIT_PAGES` trong `ocr.env`.
 - **Lưu tiến độ theo từng phần**: máy khởi động lại, worker dừng giữa chừng → làm tiếp, phần đã xong không gọi lại.
 - **Lỗi một phần**: các phần lỗi được làm lại khi file chạy lại; phần đã xong giữ nguyên, không tốn thêm lượt.
 - **Tự thử lại file lỗi**: lỗi tạm thời (quá tải, hạn mức…) → file trong `input/loi/` tự quay lại hàng đợi sau 2 giờ,
@@ -110,7 +113,7 @@ dạng `AIza…`. Key sai: file **vẫn nằm trong hàng đợi** (không bị 
 
 ## Quản trị worker
     docker logs -f pdfocr-worker                 # xem trực tiếp
-    /opt/pdfocr-deploy/run-worker.sh             # tạo lại container worker (bun + pdftoppm), không mất tiến độ
+    /opt/pdfocr-deploy/run-worker.sh             # tạo lại container worker (bun + pdftoppm + qpdf), không mất tiến độ
     docker stop pdfocr-worker                    # tạm dừng (tiến độ đã lưu)
     cd /opt/pdfocr && bun test worker/           # chạy bộ test (máy chủ Gemini giả, không tốn quota)
 
